@@ -1,5 +1,7 @@
 # hum
 
+[![CI](https://github.com/danczw/hum/actions/workflows/ci.yml/badge.svg)](https://github.com/danczw/hum/actions/workflows/ci.yml)
+
 A small terminal monitor for machines running coding agents. Built with [ratatui](https://ratatui.rs) and [sysinfo](https://crates.io/crates/sysinfo). Linux only.
 
 - CPU, memory and swap
