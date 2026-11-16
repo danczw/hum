@@ -230,3 +230,124 @@ impl OrphanTracker {
         orphans
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kind(cmd: &str) -> Option<&'static str> {
+        let cmd: Vec<OsString> = cmd.split(' ').map(OsString::from).collect();
+        agent_kind(OsStr::new(""), &cmd)
+    }
+
+    fn proc(pid: u32, parent: u32, start: u64, cmd: &str) -> (Pid, ProcInfo) {
+        let cmd: Vec<OsString> = cmd.split(' ').map(OsString::from).collect();
+        let info = ProcInfo {
+            pid: Pid::from_u32(pid),
+            parent: Some(Pid::from_u32(parent)),
+            start,
+            name: cmd[0].clone(),
+            cmd,
+            cpu: 0.0,
+            mem: 0,
+        };
+        (info.pid, info)
+    }
+
+    fn pids(orphans: &[Orphan]) -> Vec<u32> {
+        orphans.iter().map(|o| o.pid.as_u32()).collect()
+    }
+
+    #[test]
+    fn direct_binary() {
+        assert_eq!(kind("/home/u/.local/bin/claude --resume"), Some("claude"));
+        assert_eq!(kind("bash"), None);
+    }
+
+    #[test]
+    fn script_under_runtime() {
+        assert_eq!(kind("node /usr/bin/codex"), Some("codex"));
+        assert_eq!(kind("bun run opencode"), Some("opencode"));
+        assert_eq!(kind("python script.py"), None);
+    }
+
+    // aaf6466
+    #[test]
+    fn versioned_runtime_and_flags() {
+        assert_eq!(kind("python3.12 -m aider"), Some("aider"));
+        assert_eq!(kind("node --no-warnings /usr/bin/gemini"), Some("gemini"));
+        assert_eq!(kind("python3.12 -X dev -m aider"), Some("aider"));
+    }
+
+    // 89a7f15
+    #[test]
+    fn cmd_wins_over_stale_name() {
+        let cmd = [OsString::from("claude")];
+        assert_eq!(agent_kind(OsStr::new("node"), &cmd), Some("claude"));
+        assert_eq!(display_name(OsStr::new("node"), &cmd), "claude");
+    }
+
+    // 81e6388
+    #[test]
+    fn agent_name_in_script_arguments() {
+        assert_eq!(kind("python -m pytest tests/gemini"), None);
+        assert_eq!(kind("node server.js --model claude"), None);
+    }
+
+    #[test]
+    fn nested_agent_joins_parent_tree() {
+        let procs = HashMap::from([
+            proc(10, 1, 100, "claude"),
+            proc(11, 10, 101, "bash"),
+            proc(12, 11, 102, "codex"),
+        ]);
+        let agents = scan(&procs);
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].kind, "claude");
+        let tree: Vec<(u32, usize)> = agents[0]
+            .procs
+            .iter()
+            .map(|p| (p.pid.as_u32(), p.depth))
+            .collect();
+        assert_eq!(tree, [(10, 0), (11, 1), (12, 2)]);
+    }
+
+    #[test]
+    fn child_left_behind_is_orphan() {
+        let mut tracker = OrphanTracker::default();
+        let procs = HashMap::from([proc(10, 1, 100, "claude"), proc(11, 10, 101, "vite")]);
+        assert!(tracker.update(&procs, &scan(&procs)).is_empty());
+
+        let procs = HashMap::from([proc(11, 1, 101, "vite")]);
+        let orphans = tracker.update(&procs, &scan(&procs));
+        assert_eq!(pids(&orphans), [11]);
+        assert_eq!(orphans[0].agent, "claude");
+    }
+
+    #[test]
+    fn reused_pid_is_not_orphan() {
+        let mut tracker = OrphanTracker::default();
+        let procs = HashMap::from([proc(10, 1, 100, "claude"), proc(11, 10, 101, "vite")]);
+        tracker.update(&procs, &scan(&procs));
+
+        let procs = HashMap::from([proc(11, 1, 500, "vite")]);
+        assert!(tracker.update(&procs, &scan(&procs)).is_empty());
+    }
+
+    // b4a0036
+    #[test]
+    fn nested_agent_after_parent_exit_is_root() {
+        let mut tracker = OrphanTracker::default();
+        let procs = HashMap::from([
+            proc(10, 1, 100, "claude"),
+            proc(11, 10, 101, "bash"),
+            proc(12, 11, 102, "codex"),
+        ]);
+        tracker.update(&procs, &scan(&procs));
+
+        let procs = HashMap::from([proc(11, 1, 101, "bash"), proc(12, 11, 102, "codex")]);
+        let agents = scan(&procs);
+        assert_eq!(agents[0].procs[0].pid.as_u32(), 12);
+        assert_eq!(pids(&tracker.update(&procs, &agents)), [11]);
+    }
+}
