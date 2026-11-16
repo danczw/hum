@@ -399,7 +399,7 @@ fn draw_section(frame: &mut Frame, section: Section, area: Rect, theme: &Theme, 
         .title(Line::from(vec![
             Span::styled(" ", theme.dim),
             Span::styled(section.name, if shows { theme.accent } else { theme.dim }),
-            Span::styled(" ", theme.dim),
+            Span::styled(": ", theme.dim),
             Span::styled(
                 section.count.to_string(),
                 section.count_style.unwrap_or(theme.dim),
@@ -729,10 +729,10 @@ mod tests {
     fn roles_color_their_rows() {
         let theme = Theme::ayu_mirage();
         let buf = draw((74, 16), mockup(), theme);
-        assert_eq!(fg_at(&buf, "agents 3", 0), fg(theme.dim));
+        assert_eq!(fg_at(&buf, "agents: 3", 0), fg(theme.dim));
         assert_eq!(fg_at(&buf, "│ claude", 2), fg(theme.accent));
-        assert_eq!(fg_at(&buf, "orphans 1", 0), fg(theme.dim));
-        assert_eq!(fg_at(&buf, "orphans 1", 8), fg(theme.warn));
+        assert_eq!(fg_at(&buf, "orphans: 1", 0), fg(theme.dim));
+        assert_eq!(fg_at(&buf, "orphans: 1", 9), fg(theme.warn));
         // the orphan row warns but its agent tag does not
         assert_eq!(fg_at(&buf, "9120 node", 0), fg(theme.warn));
         assert_eq!(fg_at(&buf, "node    claude/hum", 8), Default::default());
@@ -766,12 +766,12 @@ mod tests {
         for label in [" 34%", "   mem ⣿", " 12.1/31G", "   swp ⡀", " 0.0/8G"] {
             assert!(lines[0].contains(label), "{label:?} in {}", lines[0]);
         }
-        assert_eq!(lines[1], format!("╭ agents 3 {}╮", "─".repeat(62)));
+        assert_eq!(lines[1], format!("╭ agents: 3 {}╮", "─".repeat(61)));
         assert!(lines[2].starts_with("│ process") && lines[2].ends_with("mem │"));
         assert!(lines[3].starts_with("│ claude") && lines[3].ends_with("310.0M │"));
         assert_eq!(lines[4], format!("╰{}╯", "─".repeat(72)));
-        assert_eq!(lines[5], format!("╭ orphans 1 {}╮", "─".repeat(61)));
-        assert_eq!(lines[7], format!("╭ ports 2 {}╮", "─".repeat(63)));
+        assert_eq!(lines[5], format!("╭ orphans: 1 {}╮", "─".repeat(60)));
+        assert_eq!(lines[7], format!("╭ ports: 2 {}╮", "─".repeat(62)));
         assert_eq!(lines[8], format!("╰{}╯", "─".repeat(72)));
     }
 
@@ -810,7 +810,7 @@ mod tests {
         let lines = lines_at(16);
         assert!(lines[0].starts_with("cpu ⣿"), "{}", lines[0]);
         assert_eq!(lines[1].trim(), "");
-        assert!(lines[2].starts_with("╭ agents 3 "), "{}", lines[2]);
+        assert!(lines[2].starts_with("╭ agents: 3 "), "{}", lines[2]);
     }
 
     #[test]
@@ -837,7 +837,7 @@ mod tests {
         let lines = draw_lines((93, 20), procs);
         // orphans sit right of agents
         assert!(
-            lines[2].starts_with("╭ agents 4 ") && lines[2].contains("╭ orphans 1 "),
+            lines[2].starts_with("╭ agents: 4 ") && lines[2].contains("╭ orphans: 1 "),
             "{}",
             lines[2]
         );
@@ -1016,8 +1016,8 @@ mod tests {
         view.focus.step(1);
         let buf = draw_view((74, 16), mockup(), &mut view);
         assert!(selected_line(&buf, &theme).unwrap().contains("9120"));
-        assert_eq!(fg_at(&buf, "orphans 1", 1), fg(theme.accent));
-        assert_eq!(fg_at(&buf, "agents 3", 0), fg(theme.dim));
+        assert_eq!(fg_at(&buf, "orphans: 1", 1), fg(theme.accent));
+        assert_eq!(fg_at(&buf, "agents: 3", 0), fg(theme.dim));
         view.focus.cycle(-1);
         let buf = draw_view((74, 16), mockup(), &mut view);
         assert!(selected_line(&buf, &theme).unwrap().contains("4123"));
