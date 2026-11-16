@@ -106,7 +106,6 @@ fn run(mut terminal: DefaultTerminal, app: &mut App) -> io::Result<()> {
                 KeyCode::Esc if view.help => view.help = false,
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                 KeyCode::Char('?') => view.help = !view.help,
-                KeyCode::Char('p') => view.theme = view.theme.flip(),
                 _ => {}
             }
         }
