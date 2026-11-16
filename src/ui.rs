@@ -119,7 +119,7 @@ fn draw_ports(frame: &mut Frame, app: &App, area: Rect) {
         Constraint::Length(6),
         Constraint::Length(8),
         Constraint::Min(8),
-        Constraint::Length(14),
+        Constraint::Min(14),
     ];
     render_table(
         frame,
@@ -140,7 +140,7 @@ fn draw_orphans(frame: &mut Frame, app: &App, area: Rect) {
             Row::new([
                 o.pid.to_string(),
                 o.name.clone(),
-                o.agent.to_string(),
+                o.agent.clone(),
                 fmt_cores(o.cpu),
                 fmt_bytes(o.mem),
             ])
@@ -151,7 +151,7 @@ fn draw_orphans(frame: &mut Frame, app: &App, area: Rect) {
     let widths = [
         Constraint::Length(8),
         Constraint::Min(8),
-        Constraint::Length(8),
+        Constraint::Min(12),
         Constraint::Length(6),
         Constraint::Length(7),
     ];
@@ -173,7 +173,7 @@ fn owner(app: &App, pid: Pid) -> Option<String> {
         .iter()
         .find(|a| a.procs.iter().any(|p| p.pid == pid))
     {
-        return Some(agent.kind.to_string());
+        return Some(agent.label());
     }
     let orphan = app.orphans.iter().find(|o| o.pid == pid)?;
     Some(format!("orphan:{}", orphan.agent))
