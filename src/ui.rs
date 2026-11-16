@@ -140,7 +140,7 @@ fn draw_orphans(frame: &mut Frame, app: &App, area: Rect) {
             Row::new([
                 o.pid.to_string(),
                 o.name.clone(),
-                o.agent.clone(),
+                o.from.clone(),
                 fmt_cores(o.cpu),
                 fmt_bytes(o.mem),
             ])
@@ -176,7 +176,7 @@ fn owner(app: &App, pid: Pid) -> Option<String> {
         return Some(agent.label());
     }
     let orphan = app.orphans.iter().find(|o| o.pid == pid)?;
-    Some(format!("orphan:{}", orphan.agent))
+    Some(format!("orphan:{}", orphan.from))
 }
 
 fn render_table<const N: usize>(
