@@ -125,13 +125,22 @@ fn agent_kind(p: &Process) -> Option<&'static str> {
     if !RUNTIMES.contains(&runtime) {
         return None;
     }
-    // Flags may take values (`python -X dev`), so check every non-flag
-    // argument rather than the first, e.g. `node --no-warnings
-    // /usr/bin/gemini` or `python -m aider`.
-    cmd[1..]
-        .iter()
-        .filter(|a| !a.to_string_lossy().starts_with('-'))
-        .find_map(|a| match_agent(basename(a)))
+    // Only the script or `-m` module names the agent; later arguments are
+    // its own, e.g. `python -m pytest tests/gemini`.
+    let mut args = cmd[1..].iter();
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("-m") => return args.next().and_then(|m| match_agent(m)),
+            // Python flags that take a separate value, e.g. `python -X dev`.
+            Some("-X" | "-W") => {
+                args.next();
+            }
+            // Flags, and the subcommand in `bun run` or `deno run`.
+            Some(a) if a.starts_with('-') || a == "run" => {}
+            _ => return match_agent(basename(arg)),
+        }
+    }
+    None
 }
 
 fn match_agent(name: &OsStr) -> Option<&'static str> {
