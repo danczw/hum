@@ -271,6 +271,11 @@ mod tests {
         assert_eq!(kind("python script.py"), None);
     }
 
+    #[test]
+    fn name_when_cmd_is_empty() {
+        assert_eq!(agent_kind(OsStr::new("claude"), &[]), Some("claude"));
+    }
+
     // aaf6466
     #[test]
     fn versioned_runtime_and_flags() {
