@@ -123,10 +123,18 @@ impl Focus {
         self.panes[self.focused].select(usize::MAX);
     }
 
-    /// Moves focus `by` sections, wrapping, and shows the cursor.
+    /// Moves focus `by` sections, wrapping and passing over sections
+    /// without rows, and shows the cursor.
     pub fn cycle(&mut self, by: isize) {
         self.active = true;
-        self.focused = (self.focused as isize + by).rem_euclid(SECTIONS as isize) as usize;
+        let mut next = self.focused;
+        for _ in 1..SECTIONS {
+            next = (next as isize + by).rem_euclid(SECTIONS as isize) as usize;
+            if !self.panes[next].keys.is_empty() {
+                self.focused = next;
+                return;
+            }
+        }
     }
 
     /// Hides the cursor and scrolls back to the top. False when the cursor
@@ -245,8 +253,26 @@ mod tests {
         focus.step(1);
         assert_eq!(focus.pane(1).frame(keys(0..3), 4).selected, 1);
         assert_eq!(agents(&mut focus, 0..10, 4).selected, 0);
+        focus.pane(2).frame(keys(0..1), 4);
         focus.cycle(-2);
         assert!(focus.shows(2));
+    }
+
+    #[test]
+    fn tab_passes_over_sections_without_rows() {
+        let mut focus = Focus::default();
+        agents(&mut focus, 0..3, 4);
+        focus.pane(1).frame(Vec::new(), 4);
+        focus.pane(2).frame(keys(0..1), 4);
+        focus.cycle(1);
+        assert!(focus.shows(2));
+        focus.cycle(1);
+        assert!(focus.shows(0));
+        // nowhere to go: focus stays
+        agents(&mut focus, [], 4);
+        focus.pane(2).frame(Vec::new(), 4);
+        focus.cycle(1);
+        assert!(focus.shows(0));
     }
 
     #[test]
