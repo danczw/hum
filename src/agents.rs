@@ -50,6 +50,9 @@ pub fn scan(sys: &System) -> Vec<Agent> {
             children.entry(parent).or_default().push(p.pid());
         }
     }
+    for kids in children.values_mut() {
+        kids.sort_unstable();
+    }
 
     let kinds: HashMap<Pid, &'static str> = sys
         .processes()
@@ -90,9 +93,7 @@ fn walk(
         depth,
     });
     if let Some(kids) = children.get(&pid) {
-        let mut kids = kids.clone();
-        kids.sort_unstable();
-        for kid in kids {
+        for &kid in kids {
             walk(sys, children, kid, depth + 1, out);
         }
     }
