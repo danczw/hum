@@ -17,13 +17,15 @@ const PID: Constraint = Constraint::Length(7);
 const CORES: Constraint = Constraint::Length(5);
 /// `fmt_bytes` up to `1023.9M`.
 const MEM: Constraint = Constraint::Length(7);
-/// Agent process names, tree indent included, are cut to this many chars.
-const PROCESS: usize = 14;
-/// Project names are cut to this many chars.
-const PROJECT: usize = 10;
-/// The agents box with both names at their cut length: five columns, four
-/// gaps, two borders.
-const AGENTS_MIN: u16 = PROCESS as u16 + PROJECT as u16 + 7 + 5 + 7 + 4 + 2;
+/// Agent process names, tree indent included, get at least this many chars.
+const PROCESS: u16 = 14;
+/// Project names get at least this many chars.
+const PROJECT: u16 = 10;
+/// The agents box without its name columns: pid, cores, mem, four gaps, two
+/// borders.
+const AGENTS_FIXED: u16 = 7 + 5 + 7 + 4 + 2;
+/// The agents box with both names at their minimum.
+const AGENTS_MIN: u16 = PROCESS + PROJECT + AGENTS_FIXED;
 /// Fits a whole orphan row such as `9120 node claude/hum 0.00 48.0M` and
 /// the `process` header.
 const SIDE_MIN: u16 = 44;
@@ -116,16 +118,16 @@ fn render(frame: &mut Frame, screen: &Screen, view: &View) {
     .areas(frame.area());
     draw_gauges(frame, screen, gauges);
 
-    let agents = agents_section(screen.agents);
     let orphans = orphans_section(screen.orphans);
     let ports = ports_section(&screen.ports);
     if body.width >= WIDE {
         let side = (body.width * 2 / 5).max(SIDE_MIN);
         let [left, right] =
             Layout::horizontal([Constraint::Fill(1), Constraint::Length(side)]).areas(body);
-        draw_section(frame, agents, left);
+        draw_section(frame, agents_section(screen.agents, left.width), left);
         stack(frame, [orphans, ports], right);
     } else {
+        let agents = agents_section(screen.agents, body.width);
         stack(frame, [agents, orphans, ports], body);
     }
 
@@ -179,14 +181,19 @@ fn draw_gauges(frame: &mut Frame, screen: &Screen, area: Rect) {
     }
 }
 
-fn agents_section(agents: &[Agent]) -> Section {
+/// `width` is the whole box. Process and project split the width the
+/// numbers leave 3:2, and names longer than their column end in `…`.
+fn agents_section(agents: &[Agent], width: u16) -> Section {
+    let names = width.saturating_sub(AGENTS_FIXED);
+    let process = names * 3 / 5;
+    let (process_max, project_max) = (usize::from(process), usize::from(names - process));
     let rows = agents
         .iter()
         .flat_map(|agent| {
             let root = &agent.procs[0];
             let head = Row::new([
-                Cell::from(cut(agent.kind, PROCESS)),
-                Cell::from(cut(&agent.project, PROJECT)),
+                Cell::from(cut(agent.kind, process_max)),
+                Cell::from(cut(&agent.project, project_max)),
                 num(root.pid.to_string()),
                 num(fmt_cores(agent.cpu())),
                 num(fmt_bytes(agent.mem())),
@@ -196,7 +203,7 @@ fn agents_section(agents: &[Agent]) -> Section {
                 Row::new([
                     Cell::from(cut(
                         &format!("{}└ {}", "  ".repeat(p.depth - 1), p.name),
-                        PROCESS,
+                        process_max,
                     )),
                     // Cell::default() spans zero columns and would shift the rest.
                     Cell::from(""),
@@ -220,8 +227,8 @@ fn agents_section(agents: &[Agent]) -> Section {
         ]),
         rows,
         widths: vec![
-            Constraint::Length(PROCESS as u16),
-            Constraint::Fill(1),
+            Constraint::Length(process),
+            Constraint::Length(names - process),
             PID,
             CORES,
             MEM,
@@ -366,7 +373,7 @@ fn cut(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
     }
-    let mut cut: String = text.chars().take(max - 1).collect();
+    let mut cut: String = text.chars().take(max.saturating_sub(1)).collect();
     cut.push('…');
     cut
 }
@@ -621,5 +628,27 @@ mod tests {
         );
         // the orphan row keeps its whole `from`
         assert!(lines[4].contains("claude/hum"), "{}", lines[4]);
+    }
+
+    #[test]
+    fn wider_panes_grow_process_more_than_project() {
+        let mut procs = mockup();
+        procs.extend([
+            child_proc(9169, 4123, "rust-analyzer"),
+            child_proc(9342, 9169, "rust-analyzer-proc-macro-srv"),
+            root_proc(7000, "claude", "/x/claude-code-plugins", 1 << 20),
+        ]);
+        let lines = draw_lines((148, 20), procs);
+        let header = &lines[3];
+        let col = |w: &str| header[..header.find(w).unwrap()].chars().count();
+        let (process, project) = (col("project") - col("process"), col("pid") - col("project"));
+        assert!(process > project && project > 11, "{process} {project}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("└ rust-analyzer-proc-macro-srv")),
+            "{lines:#?}"
+        );
+        assert!(lines.iter().any(|l| l.contains(" claude-code-plugins ")));
     }
 }
