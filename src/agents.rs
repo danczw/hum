@@ -192,6 +192,13 @@ fn basename(arg: &OsStr) -> &OsStr {
     Path::new(arg).file_name().unwrap_or(arg)
 }
 
+/// Resolves `$HOME` so a symlinked home still matches the kernel's resolved
+/// cwd. Falls back to the raw value when it cannot be resolved.
+pub fn canonical_home(raw: Option<OsString>) -> Option<PathBuf> {
+    let raw = PathBuf::from(raw?);
+    Some(raw.canonicalize().unwrap_or(raw))
+}
+
 /// Names a session's project after its working directory: `~` for the home
 /// directory, `?` when the cwd is unreadable. A deleted cwd keeps the
 /// kernel's ` (deleted)` suffix, e.g. `old (deleted)`.
@@ -439,6 +446,30 @@ mod tests {
         assert_eq!(project(Some(Path::new("/home/u")), home()), "~");
         assert_eq!(project(Some(Path::new("/home/u/")), home()), "~");
         assert_eq!(project(Some(Path::new("/home/u")), None), "u");
+    }
+
+    #[test]
+    fn symlinked_home_resolves_to_target() {
+        let dir = std::env::temp_dir().join(format!("hum-home-{}", std::process::id()));
+        let real = dir.join("real");
+        let link = dir.join("link");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        // temp_dir itself may sit behind a symlink.
+        let expected = real.canonicalize().unwrap();
+        let resolved = canonical_home(Some(link.into_os_string()));
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(resolved, Some(expected));
+    }
+
+    #[test]
+    fn unresolvable_home_kept_as_is() {
+        let raw = OsString::from("/nonexistent/hum/home");
+        assert_eq!(
+            canonical_home(Some(raw)),
+            Some(PathBuf::from("/nonexistent/hum/home"))
+        );
+        assert_eq!(canonical_home(None), None);
     }
 
     #[test]

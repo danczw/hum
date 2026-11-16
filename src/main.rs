@@ -31,7 +31,7 @@ impl App {
     fn new() -> io::Result<Self> {
         Ok(Self {
             sys: System::new().map_err(io::Error::other)?,
-            home: std::env::var_os("HOME").map(PathBuf::from),
+            home: agents::canonical_home(std::env::var_os("HOME")),
             ticks: 0,
             agents: Vec::new(),
             tracker: OrphanTracker::default(),
