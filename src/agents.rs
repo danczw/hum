@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use sysinfo::{Pid, Process, System};
 
@@ -29,6 +29,8 @@ pub struct ProcInfo {
     pub cmd: Vec<OsString>,
     pub cpu: f32,
     pub mem: u64,
+    /// None when /proc/<pid>/cwd is unreadable.
+    pub cwd: Option<PathBuf>,
 }
 
 pub fn snapshot(sys: &System) -> HashMap<Pid, ProcInfo> {
@@ -43,6 +45,7 @@ pub fn snapshot(sys: &System) -> HashMap<Pid, ProcInfo> {
                 cmd: p.cmd().to_vec(),
                 cpu: p.cpu_usage(),
                 mem: p.memory(),
+                cwd: p.cwd().map(Path::to_path_buf),
             };
             (info.pid, info)
         })
@@ -60,6 +63,8 @@ pub struct Proc {
 
 pub struct Agent {
     pub kind: &'static str,
+    /// Named after the agent process's cwd, see [`project`].
+    pub project: String,
     /// The agent process first, then its descendants depth-first.
     pub procs: Vec<Proc>,
 }
@@ -74,7 +79,7 @@ impl Agent {
     }
 }
 
-pub fn scan(procs: &HashMap<Pid, ProcInfo>) -> Vec<Agent> {
+pub fn scan(procs: &HashMap<Pid, ProcInfo>, home: Option<&Path>) -> Vec<Agent> {
     let mut children: HashMap<Pid, Vec<Pid>> = HashMap::new();
     for p in procs.values() {
         if let Some(parent) = p.parent {
@@ -99,7 +104,11 @@ pub fn scan(procs: &HashMap<Pid, ProcInfo>) -> Vec<Agent> {
         .map(|(&pid, &kind)| {
             let mut tree = Vec::new();
             walk(procs, &children, pid, 0, &mut tree);
-            Agent { kind, procs: tree }
+            Agent {
+                kind,
+                project: project(procs[&pid].cwd.as_deref(), home),
+                procs: tree,
+            }
         })
         .collect();
     agents.sort_by_key(|a| a.procs[0].pid);
@@ -178,6 +187,21 @@ fn basename(arg: &OsStr) -> &OsStr {
     Path::new(arg).file_name().unwrap_or(arg)
 }
 
+/// Names a session's project after its working directory: `~` for the home
+/// directory, `?` when the cwd is unreadable. A deleted cwd keeps the
+/// kernel's ` (deleted)` suffix, e.g. `old (deleted)`.
+pub fn project(cwd: Option<&Path>, home: Option<&Path>) -> String {
+    let Some(cwd) = cwd else {
+        return "?".into();
+    };
+    if home == Some(cwd) {
+        return "~".into();
+    }
+    cwd.file_name()
+        .map_or_else(|| cwd.to_string_lossy(), |n| n.to_string_lossy())
+        .into_owned()
+}
+
 pub struct Orphan {
     pub pid: Pid,
     pub name: String,
@@ -250,8 +274,18 @@ mod tests {
             cmd,
             cpu: 0.0,
             mem: 0,
+            cwd: None,
         };
         (info.pid, info)
+    }
+
+    fn in_dir((pid, mut info): (Pid, ProcInfo), cwd: &str) -> (Pid, ProcInfo) {
+        info.cwd = Some(PathBuf::from(cwd));
+        (pid, info)
+    }
+
+    fn home() -> Option<&'static Path> {
+        Some(Path::new("/home/u"))
     }
 
     fn pids(orphans: &[Orphan]) -> Vec<u32> {
@@ -306,7 +340,7 @@ mod tests {
             proc(11, 10, 101, "bash"),
             proc(12, 11, 102, "codex"),
         ]);
-        let agents = scan(&procs);
+        let agents = scan(&procs, home());
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0].kind, "claude");
         let tree: Vec<(u32, usize)> = agents[0]
@@ -318,13 +352,28 @@ mod tests {
     }
 
     #[test]
+    fn sessions_named_after_root_cwd() {
+        let procs = HashMap::from([
+            in_dir(proc(10, 1, 100, "claude"), "/home/u/code/a"),
+            in_dir(proc(11, 10, 101, "bash"), "/tmp"),
+            in_dir(proc(20, 1, 200, "claude"), "/home/u/code/b"),
+            proc(30, 1, 300, "codex"),
+        ]);
+        let projects: Vec<String> = scan(&procs, home())
+            .into_iter()
+            .map(|a| a.project)
+            .collect();
+        assert_eq!(projects, ["a", "b", "?"]);
+    }
+
+    #[test]
     fn child_left_behind_is_orphan() {
         let mut tracker = OrphanTracker::default();
         let procs = HashMap::from([proc(10, 1, 100, "claude"), proc(11, 10, 101, "vite")]);
-        assert!(tracker.update(&procs, &scan(&procs)).is_empty());
+        assert!(tracker.update(&procs, &scan(&procs, home())).is_empty());
 
         let procs = HashMap::from([proc(11, 1, 101, "vite")]);
-        let orphans = tracker.update(&procs, &scan(&procs));
+        let orphans = tracker.update(&procs, &scan(&procs, home()));
         assert_eq!(pids(&orphans), [11]);
         assert_eq!(orphans[0].agent, "claude");
     }
@@ -333,10 +382,10 @@ mod tests {
     fn reused_pid_is_not_orphan() {
         let mut tracker = OrphanTracker::default();
         let procs = HashMap::from([proc(10, 1, 100, "claude"), proc(11, 10, 101, "vite")]);
-        tracker.update(&procs, &scan(&procs));
+        tracker.update(&procs, &scan(&procs, home()));
 
         let procs = HashMap::from([proc(11, 1, 500, "vite")]);
-        assert!(tracker.update(&procs, &scan(&procs)).is_empty());
+        assert!(tracker.update(&procs, &scan(&procs, home())).is_empty());
     }
 
     // b4a0036
@@ -348,11 +397,40 @@ mod tests {
             proc(11, 10, 101, "bash"),
             proc(12, 11, 102, "codex"),
         ]);
-        tracker.update(&procs, &scan(&procs));
+        tracker.update(&procs, &scan(&procs, home()));
 
         let procs = HashMap::from([proc(11, 1, 101, "bash"), proc(12, 11, 102, "codex")]);
-        let agents = scan(&procs);
+        let agents = scan(&procs, home());
         assert_eq!(agents[0].procs[0].pid.as_u32(), 12);
         assert_eq!(pids(&tracker.update(&procs, &agents)), [11]);
+    }
+
+    #[test]
+    fn project_is_cwd_basename() {
+        let home = Some(Path::new("/home/u"));
+        assert_eq!(project(Some(Path::new("/home/u/code/hum")), home), "hum");
+        assert_eq!(project(Some(Path::new("/")), home), "/");
+    }
+
+    #[test]
+    fn project_at_home_is_tilde() {
+        let home = Some(Path::new("/home/u"));
+        assert_eq!(project(Some(Path::new("/home/u")), home), "~");
+        assert_eq!(project(Some(Path::new("/home/u/")), home), "~");
+        assert_eq!(project(Some(Path::new("/home/u")), None), "u");
+    }
+
+    #[test]
+    fn unreadable_cwd_is_question_mark() {
+        assert_eq!(project(None, Some(Path::new("/home/u"))), "?");
+    }
+
+    #[test]
+    fn deleted_cwd_keeps_suffix() {
+        let home = Some(Path::new("/home/u"));
+        let cwd = Path::new("/home/u/code/old (deleted)");
+        assert_eq!(project(Some(cwd), home), "old (deleted)");
+        let cwd = Path::new("/home/u (deleted)");
+        assert_eq!(project(Some(cwd), home), "u (deleted)");
     }
 }
