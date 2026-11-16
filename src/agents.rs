@@ -51,18 +51,23 @@ pub fn scan(sys: &System) -> Vec<Agent> {
         }
     }
 
-    let mut agents: Vec<Agent> = sys
+    let kinds: HashMap<Pid, &'static str> = sys
         .processes()
         .values()
-        .filter_map(|p| {
-            let kind = agent_kind(p)?;
-            // Agents started by another agent belong to that agent's tree.
-            if has_agent_ancestor(sys, p) {
-                return None;
-            }
-            let mut out = Vec::new();
-            walk(sys, &children, p.pid(), 0, &mut out);
-            Some(Agent { kind, procs: out })
+        .filter_map(|p| Some((p.pid(), agent_kind(p)?)))
+        .collect();
+    let mut agents: Vec<Agent> = kinds
+        .iter()
+        // Agents started by another agent belong to that agent's tree.
+        .filter(|&(&pid, _)| {
+            let parent = sys.process(pid).and_then(Process::parent);
+            !std::iter::successors(parent, |&p| sys.process(p)?.parent())
+                .any(|p| kinds.contains_key(&p))
+        })
+        .map(|(&pid, &kind)| {
+            let mut procs = Vec::new();
+            walk(sys, &children, pid, 0, &mut procs);
+            Agent { kind, procs }
         })
         .collect();
     agents.sort_by_key(|a| a.procs[0].pid);
@@ -91,20 +96,6 @@ fn walk(
             walk(sys, children, kid, depth + 1, out);
         }
     }
-}
-
-fn has_agent_ancestor(sys: &System, p: &Process) -> bool {
-    let mut parent = p.parent();
-    while let Some(pid) = parent {
-        let Some(proc) = sys.process(pid) else {
-            return false;
-        };
-        if agent_kind(proc).is_some() {
-            return true;
-        }
-        parent = proc.parent();
-    }
-    false
 }
 
 fn agent_kind(p: &Process) -> Option<&'static str> {
