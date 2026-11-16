@@ -25,6 +25,7 @@ pub struct Pane {
 /// The rows of a section one frame shows.
 #[derive(Debug, PartialEq)]
 pub struct Window {
+    /// The first row shown, as an index into the section's rows.
     pub offset: usize,
     /// How many rows are shown, from `offset`.
     pub rows: usize,
