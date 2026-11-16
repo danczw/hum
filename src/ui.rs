@@ -17,9 +17,19 @@ const PID: Constraint = Constraint::Length(7);
 const CORES: Constraint = Constraint::Length(5);
 /// `fmt_bytes` up to `1023.9M`.
 const MEM: Constraint = Constraint::Length(7);
+/// Agent process names, tree indent included, are cut to this many chars.
+const PROCESS: usize = 14;
+/// Project names are cut to this many chars.
+const PROJECT: usize = 10;
+/// The agents box with both names at their cut length: five columns, four
+/// gaps, two borders.
+const AGENTS_MIN: u16 = PROCESS as u16 + PROJECT as u16 + 7 + 5 + 7 + 4 + 2;
+/// Fits a whole orphan row such as `9120 node claude/hum 0.00 48.0M` and
+/// the `process` header.
+const SIDE_MIN: u16 = 44;
 /// Narrower panes stack the sections; wider ones put orphans and ports in a
 /// right-hand column.
-const WIDE: u16 = 100;
+const WIDE: u16 = AGENTS_MIN + SIDE_MIN;
 
 /// From this height up a blank row separates the gauge line from the
 /// sections. In shorter panes that row goes to data.
@@ -27,44 +37,12 @@ const AIRY: u16 = 12;
 
 const DIM: Style = Style::new().fg(Color::DarkGray);
 
-/// How sections are framed. Both looks stay selectable until one is picked
-/// on real data, then the other goes (#4).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Chrome {
-    /// A one-line dim title with count and a rule: `agents 3 ────`.
-    Borderless,
-    /// A thin rounded dim box with the title in its top border.
-    Rounded,
-}
-
-impl Chrome {
-    /// `HUM_STYLE=borderless|rounded`; rounded when unset or unknown.
-    pub fn from_env() -> Self {
-        match std::env::var("HUM_STYLE").as_deref() {
-            Ok("borderless") => Self::Borderless,
-            _ => Self::Rounded,
-        }
-    }
-
-    pub fn toggle(self) -> Self {
-        match self {
-            Self::Borderless => Self::Rounded,
-            Self::Rounded => Self::Borderless,
-        }
-    }
-
-    /// Rows a section's title and frame take, without data rows.
-    fn overhead(self) -> u16 {
-        match self {
-            Self::Borderless => 1,
-            Self::Rounded => 2,
-        }
-    }
-}
+/// Rows a section's rounded box takes without data rows: top and bottom
+/// border.
+const BOX: u16 = 2;
 
 /// What the user toggles while hum runs.
 pub struct View {
-    pub chrome: Chrome,
     pub help: bool,
 }
 
@@ -142,13 +120,13 @@ fn render(frame: &mut Frame, screen: &Screen, view: &View) {
     let orphans = orphans_section(screen.orphans);
     let ports = ports_section(&screen.ports);
     if body.width >= WIDE {
+        let side = (body.width * 2 / 5).max(SIDE_MIN);
         let [left, right] =
-            Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
-                .areas(body);
-        draw_section(frame, agents, left, view.chrome);
-        stack(frame, [orphans, ports], right, view.chrome);
+            Layout::horizontal([Constraint::Fill(1), Constraint::Length(side)]).areas(body);
+        draw_section(frame, agents, left);
+        stack(frame, [orphans, ports], right);
     } else {
-        stack(frame, [agents, orphans, ports], body, view.chrome);
+        stack(frame, [agents, orphans, ports], body);
     }
 
     if view.help {
@@ -207,8 +185,8 @@ fn agents_section(agents: &[Agent]) -> Section {
         .flat_map(|agent| {
             let root = &agent.procs[0];
             let head = Row::new([
-                Cell::from(agent.kind),
-                Cell::from(agent.project.clone()),
+                Cell::from(cut(agent.kind, PROCESS)),
+                Cell::from(cut(&agent.project, PROJECT)),
                 num(root.pid.to_string()),
                 num(fmt_cores(agent.cpu())),
                 num(fmt_bytes(agent.mem())),
@@ -216,8 +194,12 @@ fn agents_section(agents: &[Agent]) -> Section {
             .style(Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD));
             let kids = agent.procs[1..].iter().map(|p| {
                 Row::new([
-                    Cell::from(format!("{}└ {}", "  ".repeat(p.depth - 1), p.name)),
-                    Cell::default(),
+                    Cell::from(cut(
+                        &format!("{}└ {}", "  ".repeat(p.depth - 1), p.name),
+                        PROCESS,
+                    )),
+                    // Cell::default() spans zero columns and would shift the rest.
+                    Cell::from(""),
                     num(p.pid.to_string()),
                     num(fmt_cores(p.cpu)),
                     num(fmt_bytes(p.mem)),
@@ -237,7 +219,13 @@ fn agents_section(agents: &[Agent]) -> Section {
             num("mem".into()),
         ]),
         rows,
-        widths: vec![Constraint::Fill(2), Constraint::Fill(1), PID, CORES, MEM],
+        widths: vec![
+            Constraint::Length(PROCESS as u16),
+            Constraint::Fill(1),
+            PID,
+            CORES,
+            MEM,
+        ],
     }
 }
 
@@ -266,7 +254,8 @@ fn orphans_section(orphans: &[Orphan]) -> Section {
             num("mem".into()),
         ]),
         rows,
-        widths: vec![PID, Constraint::Fill(1), Constraint::Fill(2), CORES, MEM],
+        // name as wide as its `process` header; `from` takes the rest
+        widths: vec![PID, Constraint::Length(7), Constraint::Fill(1), CORES, MEM],
     }
 }
 
@@ -310,11 +299,11 @@ fn ports_section(ports: &[PortRow]) -> Section {
 /// Stacks sections top to bottom. Every section keeps its title; data rows
 /// go to the earlier sections first, and a header only shows with at least
 /// one row under it.
-fn stack<const N: usize>(frame: &mut Frame, sections: [Section; N], area: Rect, chrome: Chrome) {
+fn stack<const N: usize>(frame: &mut Frame, sections: [Section; N], area: Rect) {
     let mut left = area.height;
     let mut heights = [0; N];
     for h in &mut heights {
-        *h = chrome.overhead().min(left);
+        *h = BOX.min(left);
         left -= *h;
     }
     for (h, section) in heights.iter_mut().zip(&sections) {
@@ -329,29 +318,23 @@ fn stack<const N: usize>(frame: &mut Frame, sections: [Section; N], area: Rect, 
     }
     let areas: [Rect; N] = Layout::vertical(heights.map(Constraint::Length)).areas(area);
     for (section, area) in sections.into_iter().zip(areas) {
-        draw_section(frame, section, area, chrome);
+        draw_section(frame, section, area);
     }
 }
 
-fn draw_section(frame: &mut Frame, section: Section, area: Rect, chrome: Chrome) {
-    let title = format!("{} {}", section.name, section.count);
-    let table = Table::new(section.rows, section.widths).header(section.header.style(DIM));
-    match chrome {
-        Chrome::Borderless => {
-            let [head, body] =
-                Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(area);
-            let rule = "─".repeat(usize::from(head.width).saturating_sub(title.len() + 1));
-            frame.render_widget(Line::styled(format!("{title} {rule}"), DIM), head);
-            frame.render_widget(table, body);
-        }
-        Chrome::Rounded => {
-            let block = Block::bordered()
-                .border_type(BorderType::Rounded)
-                .border_style(DIM)
-                .title(Line::styled(format!(" {title} "), DIM));
-            frame.render_widget(table.block(block), area);
-        }
-    }
+/// A thin rounded dim box with the title and count in its top border.
+fn draw_section(frame: &mut Frame, section: Section, area: Rect) {
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(DIM)
+        .title(Line::styled(
+            format!(" {} {} ", section.name, section.count),
+            DIM,
+        ));
+    let table = Table::new(section.rows, section.widths)
+        .header(section.header.style(DIM))
+        .block(block);
+    frame.render_widget(table, area);
 }
 
 fn draw_help(frame: &mut Frame) {
@@ -359,7 +342,6 @@ fn draw_help(frame: &mut Frame) {
         "q        quit",
         "Esc      close help, else quit",
         "?        toggle this help",
-        "b        toggle borders (dev)",
     ];
     let width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) + 4;
     let [area] = Layout::horizontal([Constraint::Length(width as u16)])
@@ -377,6 +359,16 @@ fn draw_help(frame: &mut Frame) {
         Paragraph::new(lines.map(Line::from).to_vec()).block(block),
         area,
     );
+}
+
+/// `text` up to `max` chars, ending in `…` when cut.
+fn cut(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut cut: String = text.chars().take(max - 1).collect();
+    cut.push('…');
+    cut
 }
 
 /// Right-aligned, so numbers line up by their last digit.
@@ -480,18 +472,32 @@ mod tests {
         (info.pid, info)
     }
 
-    /// The 74x9 mockup from #6: three agents, one orphan, two ports.
-    fn lines(chrome: Chrome) -> Vec<String> {
-        lines_at(chrome, 9)
+    fn child_proc(pid: u32, parent: u32, cmd: &str) -> (Pid, ProcInfo) {
+        let (pid, mut info) = root_proc(pid, cmd, "/", 1 << 20);
+        info.parent = Some(Pid::from_u32(parent));
+        (pid, info)
     }
 
-    fn lines_at(chrome: Chrome, height: u16) -> Vec<String> {
-        let procs: HashMap<Pid, ProcInfo> = [
+    /// The mockup from #6: three agents, one orphan, two ports.
+    fn mockup() -> Vec<(Pid, ProcInfo)> {
+        vec![
             root_proc(4123, "claude", "/x/hum", 310 << 20),
             root_proc(5871, "claude", "/x/infra", 280 << 20),
             root_proc(6002, "codex", "/x/dots", 190 << 20),
         ]
-        .into();
+    }
+
+    /// The mockup in a 74x9 pane.
+    fn lines() -> Vec<String> {
+        lines_at(9)
+    }
+
+    fn lines_at(height: u16) -> Vec<String> {
+        draw_lines((74, height), mockup())
+    }
+
+    fn draw_lines((width, height): (u16, u16), procs: Vec<(Pid, ProcInfo)>) -> Vec<String> {
+        let procs: HashMap<Pid, ProcInfo> = procs.into_iter().collect();
         let agents = agents::scan(&procs, None);
         let orphans = [Orphan {
             pid: Pid::from_u32(9120),
@@ -521,38 +527,22 @@ mod tests {
                 },
             ],
         };
-        let view = View {
-            chrome,
-            help: false,
-        };
-        let mut terminal = Terminal::new(TestBackend::new(74, height)).unwrap();
+        let view = View { help: false };
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|f| render(f, &screen, &view)).unwrap();
         let buf = terminal.backend().buffer();
         (0..height)
-            .map(|y| (0..74).map(|x| buf[(x, y)].symbol()).collect())
+            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect())
             .collect()
     }
 
     #[test]
-    fn borderless_fits_the_small_pane() {
-        let lines = lines(Chrome::Borderless);
+    fn every_title_fits_the_small_pane() {
+        let lines = lines();
         assert!(lines[0].starts_with("cpu ⣿"), "{}", lines[0]);
         for label in [" 34%", "   mem ⣿", " 12.1/31G", "   swp ⡀", " 0.0/8G"] {
             assert!(lines[0].contains(label), "{label:?} in {}", lines[0]);
         }
-        assert_eq!(lines[1], format!("agents 3 {}", "─".repeat(65)));
-        assert!(lines[2].starts_with("process") && lines[2].ends_with("mem"));
-        assert!(lines[3].starts_with("claude") && lines[3].ends_with("310.0M"));
-        assert!(lines[5].starts_with("codex") && lines[5].contains("dots"));
-        // One row left is too few for a header and a data row.
-        assert_eq!(lines[6], format!("orphans 1 {}", "─".repeat(64)));
-        assert_eq!(lines[7], format!("ports 2 {}", "─".repeat(66)));
-    }
-
-    #[test]
-    fn rounded_keeps_every_title_in_the_small_pane() {
-        let lines = lines(Chrome::Rounded);
-        assert!(lines[0].starts_with("cpu ⣿"), "{}", lines[0]);
         assert_eq!(lines[1], format!("╭ agents 3 {}╮", "─".repeat(62)));
         assert!(lines[2].starts_with("│process") && lines[2].ends_with("mem│"));
         assert!(lines[3].starts_with("│claude") && lines[3].ends_with("310.0M│"));
@@ -582,7 +572,7 @@ mod tests {
 
     #[test]
     fn gauges_get_a_blank_row_below_when_rows_allow() {
-        let lines = lines_at(Chrome::Rounded, 16);
+        let lines = lines_at(16);
         assert!(lines[0].starts_with("cpu ⣿"), "{}", lines[0]);
         assert_eq!(lines[1].trim(), "");
         assert!(lines[2].starts_with("╭ agents 3 "), "{}", lines[2]);
@@ -590,7 +580,7 @@ mod tests {
 
     #[test]
     fn sections_name_their_columns() {
-        let lines = lines_at(Chrome::Rounded, 16);
+        let lines = lines_at(16);
         let words = |l: &str| {
             l.split(['│', ' '])
                 .filter(|w| !w.is_empty())
@@ -599,5 +589,37 @@ mod tests {
         };
         assert_eq!(words(&lines[3]), "process project pid cores mem");
         assert!(lines[4].starts_with("│claude"), "{}", lines[4]);
+    }
+
+    #[test]
+    fn long_names_are_cut_so_93_cols_fit_side_by_side() {
+        let mut procs = mockup();
+        procs.extend([
+            child_proc(9169, 4123, "rust-analyzer"),
+            child_proc(9342, 9169, "rust-analyzer-proc-macro-srv"),
+            root_proc(7000, "claude", "/x/claude-code-plugins", 1 << 20),
+        ]);
+        let lines = draw_lines((93, 20), procs);
+        // orphans sit right of agents
+        assert!(
+            lines[2].starts_with("╭ agents 4 ") && lines[2].contains("╭ orphans 1 "),
+            "{}",
+            lines[2]
+        );
+        assert!(
+            lines.iter().any(|l| l.starts_with("│  └ rust-anal… ")),
+            "{lines:#?}"
+        );
+        let pid_end = |pid: &str| {
+            let line = lines.iter().find(|l| l.contains(pid)).unwrap();
+            line[..line.find(pid).unwrap()].chars().count() + pid.len()
+        };
+        assert_eq!(pid_end("9342"), pid_end("4123"), "{lines:#?}");
+        assert!(
+            lines.iter().any(|l| l.contains(" claude-co… ")),
+            "{lines:#?}"
+        );
+        // the orphan row keeps its whole `from`
+        assert!(lines[4].contains("claude/hum"), "{}", lines[4]);
     }
 }
