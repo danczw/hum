@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::path::Path;
 
@@ -25,6 +25,7 @@ pub struct Proc {
     pub cpu: f32,
     pub mem: u64,
     pub depth: usize,
+    start: u64,
 }
 
 pub struct Agent {
@@ -91,6 +92,7 @@ fn walk(
         cpu: p.cpu_usage(),
         mem: p.memory(),
         depth,
+        start: p.start_time(),
     });
     if let Some(kids) = children.get(&pid) {
         for &kid in kids {
@@ -170,15 +172,11 @@ impl OrphanTracker {
         self.seen
             .retain(|pid, (_, start)| sys.process(*pid).is_some_and(|p| p.start_time() == *start));
 
-        let mut current = HashMap::new();
+        let mut current = HashSet::new();
         for agent in agents {
             for p in &agent.procs[1..] {
-                current.insert(p.pid, agent.kind);
-            }
-        }
-        for (pid, kind) in &current {
-            if let Some(p) = sys.process(*pid) {
-                self.seen.insert(*pid, (kind, p.start_time()));
+                current.insert(p.pid);
+                self.seen.insert(p.pid, (agent.kind, p.start));
             }
         }
         // A nested agent whose parent agent exited is now a root, not an orphan.
@@ -189,7 +187,7 @@ impl OrphanTracker {
         let mut orphans: Vec<Orphan> = self
             .seen
             .iter()
-            .filter(|(pid, _)| !current.contains_key(pid))
+            .filter(|(pid, _)| !current.contains(pid))
             .filter_map(|(pid, (agent, _))| {
                 let p = sys.process(*pid)?;
                 Some(Orphan {
