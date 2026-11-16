@@ -12,3 +12,7 @@ cargo run --release
 ```
 
 Press `q` or `Esc` to quit.
+
+## License
+
+Apache-2.0, see [LICENSE](LICENSE).
