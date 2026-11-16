@@ -356,20 +356,28 @@ fn stack<const N: usize>(
         *h = BOX.min(left);
         left -= *h;
     }
-    for (h, section) in heights.iter_mut().zip(&sections) {
-        if section.rows.is_empty() || left < 2 {
+    // header and data lines; the focused section first gets its header and
+    // a line for the cursor
+    let mut lines = [0; N];
+    for (l, section) in lines.iter_mut().zip(&sections) {
+        if focus.shows(section.pane) && !section.rows.is_empty() && left >= 2 {
+            *l = 2;
+            left -= 2;
+        }
+    }
+    for (l, section) in lines.iter_mut().zip(&sections) {
+        if section.rows.is_empty() || (*l == 0 && left < 2) {
             continue;
         }
-        let rows = u16::try_from(section.rows.len() + 1)
-            .unwrap_or(u16::MAX)
-            .min(left);
-        *h += rows;
+        let want = u16::try_from(section.rows.len() + 1).unwrap_or(u16::MAX);
+        let rows = want.saturating_sub(*l).min(left);
+        *l += rows;
         left -= rows;
     }
     let share = left / N as u16;
-    for (i, h) in heights.iter_mut().enumerate() {
+    for (i, (h, l)) in heights.iter_mut().zip(lines).enumerate() {
         // the remainder goes to the first sections
-        *h += share + u16::from((i as u16) < left % N as u16);
+        *h += l + share + u16::from((i as u16) < left % N as u16);
     }
     let areas: [Rect; N] = Layout::vertical(heights.map(Constraint::Length)).areas(area);
     for (section, area) in sections.into_iter().zip(areas) {
@@ -673,12 +681,8 @@ mod tests {
     fn selected_line(buf: &Buffer, theme: &Theme) -> Option<String> {
         let lines = text(buf);
         (0..buf.area.height)
-            .find(|&y| buf[(2, y)].bg == fg_or(theme.selected.bg))
+            .find(|&y| Some(buf[(2, y)].bg) == theme.selected.bg)
             .map(|y| lines[usize::from(y)].clone())
-    }
-
-    fn fg_or(color: Option<Color>) -> Color {
-        color.unwrap_or_default()
     }
 
     /// One claude session with `kids` children: 1 + `kids` agent rows.
@@ -919,6 +923,20 @@ mod tests {
         let line = selected_line(&buf, &theme).unwrap();
         assert!(line.contains("5029"), "{line}");
         assert!(!text(&buf).iter().any(|l| l.contains("more")));
+    }
+
+    #[test]
+    fn focused_section_keeps_a_line_for_its_cursor() {
+        let theme = Theme::ayu_mirage();
+        let mut view = View {
+            help: false,
+            theme,
+            focus: Focus::default(),
+        };
+        draw_view((74, 9), big_tree(29), &mut view);
+        view.focus.cycle(1);
+        let buf = draw_view((74, 9), big_tree(29), &mut view);
+        assert!(selected_line(&buf, &theme).unwrap().contains("9120"));
     }
 
     #[test]
