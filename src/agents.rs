@@ -111,12 +111,15 @@ fn has_agent_ancestor(sys: &System, p: &Process) -> bool {
 }
 
 fn agent_kind(p: &Process) -> Option<&'static str> {
-    if let Some(kind) = match_agent(p.name()) {
+    let cmd = p.cmd();
+    let program = cmd.first().map(|a| basename(a));
+    if let Some(kind) = program
+        .and_then(match_agent)
+        .or_else(|| match_agent(p.name()))
+    {
         return Some(kind);
     }
-    let cmd = p.cmd();
-    let runtime = cmd.first().map(|a| basename(a))?;
-    if RUNTIMES.contains(&runtime.to_string_lossy().as_ref()) {
+    if RUNTIMES.contains(&program?.to_string_lossy().as_ref()) {
         return cmd.get(1).and_then(|a| match_agent(basename(a)));
     }
     None

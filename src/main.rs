@@ -42,7 +42,9 @@ impl App {
             ProcessRefreshKind::nothing()
                 .with_cpu()
                 .with_memory()
-                .with_cmd(UpdateKind::OnlyIfNotSet),
+                // sysinfo keeps a pid's name from before an exec, so re-read
+                // cmd every tick to see what the process runs now.
+                .with_cmd(UpdateKind::Always),
         );
         self.agents = agents::scan(&self.sys);
         self.orphans = self.tracker.update(&self.sys, &self.agents);
