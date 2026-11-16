@@ -12,7 +12,7 @@ use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 use agents::{Agent, Orphan, OrphanTracker};
 use ports::Listener;
-use ui::{Chrome, View};
+use ui::View;
 
 const TICK: Duration = Duration::from_secs(1);
 /// Ports change rarely and resolving owners reads every fd in /proc.
@@ -39,10 +39,7 @@ impl App {
             tracker: OrphanTracker::default(),
             orphans: Vec::new(),
             ports: Vec::new(),
-            view: View {
-                chrome: Chrome::from_env(),
-                help: false,
-            },
+            view: View { help: false },
         })
     }
 
@@ -104,7 +101,6 @@ fn run(mut terminal: DefaultTerminal, app: &mut App) -> io::Result<()> {
                 KeyCode::Esc if view.help => view.help = false,
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                 KeyCode::Char('?') => view.help = !view.help,
-                KeyCode::Char('b') => view.chrome = view.chrome.toggle(),
                 _ => {}
             }
         }
