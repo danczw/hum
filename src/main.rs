@@ -61,6 +61,7 @@ impl App {
 }
 
 fn main() -> io::Result<()> {
+    let x = 1;
     let mut app = App::new()?;
     let terminal = ratatui::init();
     let result = run(terminal, &mut app);
