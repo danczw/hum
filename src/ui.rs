@@ -7,6 +7,16 @@ use sysinfo::Pid;
 
 use crate::App;
 
+// Numbers get fixed widths and text columns fill what is left, so a narrow
+// pane truncates names, never numbers. Fill ranks below Length in ratatui's
+// layout, Min ranks above it.
+/// pid_max is at most 4194304 on 64-bit Linux: 7 digits.
+const PID: Constraint = Constraint::Length(7);
+/// `fmt_cores` up to 99.99 cores.
+const CORES: Constraint = Constraint::Length(5);
+/// `fmt_bytes` up to `1023.9M`.
+const MEM: Constraint = Constraint::Length(7);
+
 pub fn draw(frame: &mut Frame, app: &App) {
     let [gauges, body, footer] = Layout::vertical([
         Constraint::Length(3),
@@ -76,13 +86,7 @@ fn draw_agents(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
     let title = format!(" agents ({}) ", app.agents.len());
-    let widths = [
-        Constraint::Min(16),
-        Constraint::Min(8),
-        Constraint::Length(8),
-        Constraint::Length(7),
-        Constraint::Length(7),
-    ];
+    let widths = [Constraint::Fill(2), Constraint::Fill(1), PID, CORES, MEM];
     render_table(
         frame,
         area,
@@ -117,9 +121,9 @@ fn draw_ports(frame: &mut Frame, app: &App, area: Rect) {
     let title = format!(" ports ({}) ", app.ports.len());
     let widths = [
         Constraint::Length(6),
-        Constraint::Length(8),
-        Constraint::Min(8),
-        Constraint::Min(14),
+        PID,
+        Constraint::Fill(1),
+        Constraint::Fill(2),
     ];
     render_table(
         frame,
@@ -148,13 +152,7 @@ fn draw_orphans(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
     let title = format!(" orphans ({}) ", app.orphans.len());
-    let widths = [
-        Constraint::Length(8),
-        Constraint::Min(8),
-        Constraint::Min(12),
-        Constraint::Length(6),
-        Constraint::Length(7),
-    ];
+    let widths = [PID, Constraint::Fill(1), Constraint::Fill(2), CORES, MEM];
     render_table(
         frame,
         area,
