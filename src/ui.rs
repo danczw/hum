@@ -155,35 +155,34 @@ fn draw_gauges(frame: &mut Frame, screen: &Screen, area: Rect, theme: &Theme) {
         (
             "cpu",
             screen.cpu,
-            // as wide as `100%` so the bars do not jitter
-            format!("{:>4}", format!("{:.0}%", screen.cpu * 100.0)),
+            // as wide as `100` so the bars do not jitter
+            format!("{:>3.0}", screen.cpu * 100.0),
+            "%",
         ),
-        ("mem", ratio(screen.mem), usage_label(screen.mem)),
-        ("swp", ratio(screen.swap), usage_label(screen.swap)),
+        ("mem", ratio(screen.mem), usage_label(screen.mem), "G"),
+        ("swp", ratio(screen.swap), usage_label(screen.swap), "G"),
     ];
     const GAP: u16 = 3;
-    // name, space, bar, space, label
-    let text = |(name, _, label): &(&str, f64, String)| name.len() + label.len() + 2;
+    // name, space, bar, space, value, unit
+    let text = |(name, _, value, unit): &(&str, f64, String, &str)| {
+        name.len() + value.len() + unit.len() + 2
+    };
     let fixed: usize = gauges.iter().map(text).sum::<usize>() + usize::from(GAP) * 2;
     let bar = usize::from(area.width).saturating_sub(fixed) / gauges.len();
     let widths = gauges
         .each_ref()
         .map(|g| Constraint::Length((text(g) + bar) as u16));
     let areas: [Rect; 3] = Layout::horizontal(widths).spacing(GAP).areas(area);
-    for ((name, ratio, label), area) in gauges.into_iter().zip(areas) {
-        let bar = braille_bar(ratio, bar);
-        // a blank cell ends the used part
-        let (used, unused) = bar.split_at(bar.find('⠀').unwrap_or(bar.len()));
-        // every label ends in a one-char unit: `%` or `G`
-        let (value, unit) = label.split_at(label.len() - 1);
+    for ((name, ratio, value, unit), area) in gauges.into_iter().zip(areas) {
+        let (used, unused) = braille_bar(ratio, bar);
         let line = Line::from(vec![
             Span::styled(name, theme.dim),
             Span::raw(" "),
-            Span::styled(used.to_string(), theme.load(ratio)),
-            Span::styled(unused.to_string(), theme.dim),
+            Span::styled(used, theme.load(ratio)),
+            Span::styled(unused, theme.dim),
             Span::raw(" "),
-            Span::raw(value.to_string()),
-            Span::styled(unit.to_string(), theme.dim),
+            Span::raw(value),
+            Span::styled(unit, theme.dim),
         ]);
         frame.render_widget(line, area);
     }
@@ -254,12 +253,13 @@ fn orphans_section(orphans: &[Orphan], theme: &Theme) -> Section {
         .iter()
         .map(|o| {
             Row::new([
-                num(o.pid.to_string()).style(theme.warn),
-                Cell::from(cut(&o.name, ORPHAN_NAME)).style(theme.warn),
-                Cell::from(o.from.clone()),
-                num(fmt_cores(o.cpu)).style(theme.warn),
-                num(fmt_bytes(o.mem)).style(theme.warn),
+                num(o.pid.to_string()),
+                Cell::from(cut(&o.name, ORPHAN_NAME)),
+                Cell::from(o.from.clone()).style(Style::reset()),
+                num(fmt_cores(o.cpu)),
+                num(fmt_bytes(o.mem)),
             ])
+            .style(theme.warn)
         })
         .collect();
     Section {
@@ -432,22 +432,22 @@ fn ratio((used, total): (u64, u64)) -> f64 {
     }
 }
 
-/// `12.1/31G`, padded to the width of a full one so the bar does not jitter.
-/// The total drops a trailing `.0` (`8G`) but keeps other decimals, so a
-/// 400M swapfile reads `0.4G`, not `0G`.
+/// `12.1/31` in GiB, padded to the width of a full one so the bar does not
+/// jitter. The total drops a trailing `.0` (`8`) but keeps other decimals,
+/// so a 400M swapfile reads `0.4`, not `0`.
 fn usage_label((used, total): (u64, u64)) -> String {
     const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
     let total = format!("{:.1}", total as f64 / GIB);
     let total = total.strip_suffix(".0").unwrap_or(&total);
-    let label = |used: f64| format!("{used:.1}/{total}G");
+    let label = |used: f64| format!("{used:.1}/{total}");
     let width = label(total.parse().unwrap_or(0.0)).len();
     format!("{:>width$}", label(used as f64 / GIB))
 }
 
 /// A bar `width` cells wide in eighths of a cell: each braille cell fills its
 /// left column bottom-up, then its right column. Any use above zero shows at
-/// least one dot.
-fn braille_bar(ratio: f64, width: usize) -> String {
+/// least one dot. Returns the used cells and the blank rest.
+fn braille_bar(ratio: f64, width: usize) -> (String, String) {
     const PARTIAL: [char; 8] = ['⠀', '⡀', '⡄', '⡆', '⡇', '⣇', '⣧', '⣷'];
     let steps = width * 8;
     let ratio = ratio.clamp(0.0, 1.0);
@@ -456,12 +456,12 @@ fn braille_bar(ratio: f64, width: usize) -> String {
         filled = filled.max(1).min(steps);
     }
     let (full, part) = (filled / 8, filled % 8);
-    let mut bar = "⣿".repeat(full);
-    if full < width {
-        bar.push(PARTIAL[part]);
-        bar.push_str(&"⠀".repeat(width - full - 1));
+    let mut used = "⣿".repeat(full);
+    if part > 0 {
+        used.push(PARTIAL[part]);
     }
-    bar
+    let unused = "⠀".repeat(width - full - usize::from(part > 0));
+    (used, unused)
 }
 
 fn fmt_bytes(bytes: u64) -> String {
@@ -651,22 +651,34 @@ mod tests {
         assert_eq!(lines[8], format!("╰{}╯", "─".repeat(72)));
     }
 
+    fn bar(ratio: f64, width: usize) -> String {
+        let (used, unused) = braille_bar(ratio, width);
+        used + &unused
+    }
+
+    #[test]
+    fn braille_bar_splits_after_the_last_dot() {
+        assert_eq!(braille_bar(3.0 / 32.0, 4), ("⡆".into(), "⠀⠀⠀".into()));
+        assert_eq!(braille_bar(0.5, 4), ("⣿⣿".into(), "⠀⠀".into()));
+        assert_eq!(braille_bar(0.0, 2), ("".into(), "⠀⠀".into()));
+    }
+
     #[test]
     fn braille_bar_steps_in_eighths_of_a_cell() {
-        assert_eq!(braille_bar(0.0, 4), "⠀⠀⠀⠀");
-        assert_eq!(braille_bar(1.0, 4), "⣿⣿⣿⣿");
+        assert_eq!(bar(0.0, 4), "⠀⠀⠀⠀");
+        assert_eq!(bar(1.0, 4), "⣿⣿⣿⣿");
         // 4 cells = 32 steps; 0.5 fills 2 cells, 3/32 adds three left dots.
-        assert_eq!(braille_bar(0.5, 4), "⣿⣿⠀⠀");
-        assert_eq!(braille_bar(3.0 / 32.0, 4), "⡆⠀⠀⠀");
-        assert_eq!(braille_bar(7.0 / 32.0, 4), "⣷⠀⠀⠀");
+        assert_eq!(bar(0.5, 4), "⣿⣿⠀⠀");
+        assert_eq!(bar(3.0 / 32.0, 4), "⡆⠀⠀⠀");
+        assert_eq!(bar(7.0 / 32.0, 4), "⣷⠀⠀⠀");
     }
 
     #[test]
     fn braille_bar_shows_any_use_and_clamps() {
-        assert_eq!(braille_bar(0.001, 4), "⡀⠀⠀⠀");
-        assert_eq!(braille_bar(1.5, 2), "⣿⣿");
-        assert_eq!(braille_bar(-1.0, 2), "⠀⠀");
-        assert_eq!(braille_bar(0.5, 0), "");
+        assert_eq!(bar(0.001, 4), "⡀⠀⠀⠀");
+        assert_eq!(bar(1.5, 2), "⣿⣿");
+        assert_eq!(bar(-1.0, 2), "⠀⠀");
+        assert_eq!(bar(0.5, 0), "");
     }
 
     #[test]
