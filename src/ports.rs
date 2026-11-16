@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 
 use sysinfo::Pid;
@@ -33,7 +33,8 @@ pub fn listening() -> Vec<Listener> {
         }
     }
 
-    let owners = socket_owners();
+    let wanted: HashSet<&str> = sockets.iter().map(|(_, inode)| inode.as_str()).collect();
+    let owners = socket_owners(&wanted);
     let mut listeners: Vec<Listener> = sockets
         .into_iter()
         .map(|(port, inode)| Listener {
@@ -46,14 +47,21 @@ pub fn listening() -> Vec<Listener> {
     listeners
 }
 
-/// Maps socket inodes to the pid holding them. Sockets held by other users'
-/// processes stay unresolved, since their fd tables are not readable.
-fn socket_owners() -> HashMap<String, Pid> {
+/// Maps the wanted socket inodes to the pid holding them, stopping once all
+/// are found. Sockets held by other users' processes stay unresolved, since
+/// their fd tables are not readable.
+fn socket_owners(wanted: &HashSet<&str>) -> HashMap<String, Pid> {
     let mut owners = HashMap::new();
+    if wanted.is_empty() {
+        return owners;
+    }
     let Ok(entries) = fs::read_dir("/proc") else {
         return owners;
     };
     for entry in entries.flatten() {
+        if owners.len() == wanted.len() {
+            break;
+        }
         let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse().ok()) else {
             continue;
         };
@@ -68,7 +76,7 @@ fn socket_owners() -> HashMap<String, Pid> {
                 .to_str()
                 .and_then(|t| t.strip_prefix("socket:["))
                 .and_then(|t| t.strip_suffix(']'));
-            if let Some(inode) = inode {
+            if let Some(inode) = inode.filter(|i| wanted.contains(i)) {
                 owners.insert(inode.to_string(), Pid::from_u32(pid));
             }
         }
