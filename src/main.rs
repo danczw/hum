@@ -109,6 +109,8 @@ fn run(mut terminal: DefaultTerminal, app: &mut App, view: &mut View) -> io::Res
                 KeyCode::Esc if focus.clear() => {}
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                 KeyCode::Char('?') => view.help = !view.help,
+                // the cursor stays put behind the help
+                _ if view.help => {}
                 KeyCode::Char('j') | KeyCode::Down => focus.step(1),
                 KeyCode::Char('k') | KeyCode::Up => focus.step(-1),
                 KeyCode::Char('g') => focus.first(),
