@@ -162,6 +162,10 @@ impl OrphanTracker {
                 self.seen.insert(*pid, (kind, p.start_time()));
             }
         }
+        // A nested agent whose parent agent exited is now a root, not an orphan.
+        for agent in agents {
+            self.seen.remove(&agent.procs[0].pid);
+        }
 
         let mut orphans: Vec<Orphan> = self
             .seen
