@@ -24,26 +24,47 @@ pub struct Theme {
 
 impl Theme {
     /// Modifiers only when `NO_COLOR` is set and non-empty (no-color.org),
-    /// else [`Theme::ayu_mirage`].
+    /// else [`Theme::ayu_mirage`] when `COLORTERM` announces truecolor, else
+    /// [`Theme::ansi`].
     pub fn from_env() -> Self {
-        if std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()) {
-            Self::no_color()
-        } else {
-            Self::ayu_mirage()
+        let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
+        let truecolor = std::env::var("COLORTERM").is_ok_and(|v| v == "truecolor" || v == "24bit");
+        Self::pick(no_color, truecolor)
+    }
+
+    fn pick(no_color: bool, truecolor: bool) -> Self {
+        match (no_color, truecolor) {
+            (true, _) => Self::no_color(),
+            (false, true) => Self::ayu_mirage(),
+            (false, false) => Self::ansi(),
         }
     }
 
     /// Truecolor, the older ayu-mirage palette (bg `#212733`, fg `#d9d7ce`).
     /// Dark backgrounds only.
     pub fn ayu_mirage() -> Self {
-        let warn = Color::from_u32(0xffd57f);
+        Self::colors(
+            Color::from_u32(0x5c6773),
+            Color::from_u32(0x5ccfe6),
+            Color::from_u32(0xffd57f),
+            Color::from_u32(0xff3333),
+        )
+    }
+
+    /// ANSI 16 for terminals without truecolor; follows the terminal theme.
+    pub fn ansi() -> Self {
+        Self::colors(Color::DarkGray, Color::Cyan, Color::Yellow, Color::Red)
+    }
+
+    /// `warn` doubles as `load_mid`; `load_low` keeps the default fg.
+    fn colors(dim: Color, accent: Color, warn: Color, high: Color) -> Self {
         Self {
-            dim: Style::new().fg(Color::from_u32(0x5c6773)),
-            accent: Style::new().fg(Color::from_u32(0x5ccfe6)),
+            dim: Style::new().fg(dim),
+            accent: Style::new().fg(accent),
             warn: Style::new().fg(warn),
             load_low: Style::new(),
             load_mid: Style::new().fg(warn),
-            load_high: Style::new().fg(Color::from_u32(0xff3333)),
+            load_high: Style::new().fg(high),
             selected: Style::new().add_modifier(Modifier::REVERSED),
         }
     }
@@ -103,5 +124,16 @@ mod tests {
             assert_eq!((style.fg, style.bg), (None, None), "{style:?}");
         }
         assert!(theme.selected.add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn truecolor_picks_ayu_mirage_and_no_color_wins() {
+        let accent = |theme: Theme| theme.accent.fg;
+        assert_eq!(
+            accent(Theme::pick(false, true)),
+            accent(Theme::ayu_mirage())
+        );
+        assert_eq!(accent(Theme::pick(false, false)), accent(Theme::ansi()));
+        assert_eq!(accent(Theme::pick(true, true)), None);
     }
 }
