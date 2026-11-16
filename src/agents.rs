@@ -58,7 +58,7 @@ pub struct Proc {
     pub cpu: f32,
     pub mem: u64,
     pub depth: usize,
-    start: u64,
+    pub start: u64,
 }
 
 pub struct Agent {
@@ -219,6 +219,7 @@ pub struct Orphan {
     pub name: String,
     /// The session that spawned it, see [`Agent::label`].
     pub from: String,
+    pub start: u64,
     pub cpu: f32,
     pub mem: u64,
 }
@@ -255,12 +256,13 @@ impl OrphanTracker {
             .seen
             .iter()
             .filter(|(pid, _)| !current.contains(pid))
-            .filter_map(|(pid, (from, _))| {
+            .filter_map(|(pid, (from, start))| {
                 let p = procs.get(pid)?;
                 Some(Orphan {
                     pid: *pid,
                     name: display_name(&p.name, &p.cmd),
                     from: from.clone(),
+                    start: *start,
                     cpu: p.cpu,
                     mem: p.mem,
                 })

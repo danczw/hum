@@ -1,4 +1,5 @@
 mod agents;
+mod focus;
 mod ports;
 mod theme;
 mod ui;
@@ -12,6 +13,7 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 use agents::{Agent, Orphan, OrphanTracker};
+use focus::Focus;
 use ports::Listener;
 use theme::Theme;
 use ui::View;
@@ -28,7 +30,6 @@ struct App {
     tracker: OrphanTracker,
     orphans: Vec<Orphan>,
     ports: Vec<Listener>,
-    view: View,
 }
 
 impl App {
@@ -41,10 +42,6 @@ impl App {
             tracker: OrphanTracker::default(),
             orphans: Vec::new(),
             ports: Vec::new(),
-            view: View {
-                help: false,
-                theme: Theme::from_env(),
-            },
         })
     }
 
@@ -78,13 +75,18 @@ impl App {
 
 fn main() -> io::Result<()> {
     let mut app = App::new()?;
+    let mut view = View {
+        help: false,
+        theme: Theme::from_env(),
+        focus: Focus::default(),
+    };
     let terminal = ratatui::init();
-    let result = run(terminal, &mut app);
+    let result = run(terminal, &mut app, &mut view);
     ratatui::restore();
     result
 }
 
-fn run(mut terminal: DefaultTerminal, app: &mut App) -> io::Result<()> {
+fn run(mut terminal: DefaultTerminal, app: &mut App, view: &mut View) -> io::Result<()> {
     app.refresh();
     let mut last_tick = Instant::now();
 
@@ -94,18 +96,27 @@ fn run(mut terminal: DefaultTerminal, app: &mut App) -> io::Result<()> {
             last_tick = Instant::now();
         }
 
-        terminal.draw(|frame| ui::draw(frame, app))?;
+        terminal.draw(|frame| ui::draw(frame, app, view))?;
 
         let timeout = TICK.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)?
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
-            let view = &mut app.view;
+            let focus = &mut view.focus;
             match key.code {
                 KeyCode::Esc if view.help => view.help = false,
+                KeyCode::Esc if focus.clear() => {}
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                 KeyCode::Char('?') => view.help = !view.help,
+                KeyCode::Char('j') | KeyCode::Down => focus.step(1),
+                KeyCode::Char('k') | KeyCode::Up => focus.step(-1),
+                KeyCode::Char('g') => focus.first(),
+                KeyCode::Char('G') => focus.last(),
+                KeyCode::PageDown => focus.page(true),
+                KeyCode::PageUp => focus.page(false),
+                KeyCode::Tab => focus.cycle(1),
+                KeyCode::BackTab => focus.cycle(-1),
                 _ => {}
             }
         }

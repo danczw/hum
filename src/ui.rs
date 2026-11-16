@@ -2,11 +2,14 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Cell, Clear, Padding, Paragraph, Row, Table};
+use ratatui::widgets::{
+    Block, BorderType, Cell, Clear, Padding, Paragraph, Row, Table, TableState,
+};
 use sysinfo::Pid;
 
 use crate::App;
 use crate::agents::{self, Agent, Orphan};
+use crate::focus::{self, Focus, Key};
 use crate::theme::Theme;
 
 // Numbers get fixed widths and text columns fill what is left, so a narrow
@@ -48,6 +51,7 @@ const BOX: u16 = 2;
 pub struct View {
     pub help: bool,
     pub theme: Theme,
+    pub focus: Focus,
 }
 
 /// Everything one frame shows, read out of [`App`] so drawing needs no
@@ -74,16 +78,20 @@ struct PortRow {
 /// A titled list of rows under a dim header naming the columns.
 struct Section {
     name: &'static str,
+    /// The section's cursor in [`Focus`].
+    pane: usize,
     count: usize,
     /// Draws the count in the title; `None` keeps it dim like the rest.
     count_style: Option<Style>,
     header: Row<'static>,
     rows: Vec<Row<'static>>,
+    /// One per row.
+    keys: Vec<Key>,
     widths: Vec<Constraint>,
 }
 
-pub fn draw(frame: &mut Frame, app: &App) {
-    render(frame, &screen(app), &app.view);
+pub fn draw(frame: &mut Frame, app: &App, view: &mut View) {
+    render(frame, &screen(app), view);
 }
 
 fn screen(app: &App) -> Screen<'_> {
@@ -112,8 +120,9 @@ fn screen(app: &App) -> Screen<'_> {
     }
 }
 
-fn render(frame: &mut Frame, screen: &Screen, view: &View) {
+fn render(frame: &mut Frame, screen: &Screen, view: &mut View) {
     let theme = &view.theme;
+    let focus = &mut view.focus;
     let pad = u16::from(frame.area().height >= AIRY);
     let [gauges, _, body] = Layout::vertical([
         Constraint::Length(1),
@@ -134,11 +143,12 @@ fn render(frame: &mut Frame, screen: &Screen, view: &View) {
             agents_section(screen.agents, left.width, theme),
             left,
             theme,
+            focus,
         );
-        stack(frame, [orphans, ports], right, theme);
+        stack(frame, [orphans, ports], right, theme, focus);
     } else {
         let agents = agents_section(screen.agents, body.width, theme);
-        stack(frame, [agents, orphans, ports], body, theme);
+        stack(frame, [agents, orphans, ports], body, theme, focus);
     }
 
     if view.help {
@@ -227,6 +237,7 @@ fn agents_section(agents: &[Agent], width: u16, theme: &Theme) -> Section {
         .collect();
     Section {
         name: "agents",
+        pane: focus::AGENTS,
         count: agents.len(),
         count_style: None,
         header: Row::new([
@@ -237,6 +248,10 @@ fn agents_section(agents: &[Agent], width: u16, theme: &Theme) -> Section {
             num("mem".into()),
         ]),
         rows,
+        keys: agents
+            .iter()
+            .flat_map(|a| a.procs.iter().map(|p| key(p.pid, p.start)))
+            .collect(),
         widths: vec![
             Constraint::Length(process),
             Constraint::Length(project),
@@ -264,6 +279,7 @@ fn orphans_section(orphans: &[Orphan], theme: &Theme) -> Section {
         .collect();
     Section {
         name: "orphans",
+        pane: focus::ORPHANS,
         count: orphans.len(),
         count_style: (!orphans.is_empty()).then_some(theme.warn),
         header: Row::new([
@@ -274,6 +290,7 @@ fn orphans_section(orphans: &[Orphan], theme: &Theme) -> Section {
             num("mem".into()),
         ]),
         rows,
+        keys: orphans.iter().map(|o| key(o.pid, o.start)).collect(),
         // name as wide as its `process` header; `from` takes the rest
         widths: vec![
             PID,
@@ -299,6 +316,7 @@ fn ports_section(ports: &[PortRow]) -> Section {
         .collect();
     Section {
         name: "ports",
+        pane: focus::PORTS,
         count: ports.len(),
         count_style: None,
         header: Row::new([
@@ -308,6 +326,10 @@ fn ports_section(ports: &[PortRow]) -> Section {
             Cell::from("agent"),
         ]),
         rows,
+        keys: ports
+            .iter()
+            .map(|p| (u64::from(p.port), p.pid.map_or(0, |p| p.as_u32().into())))
+            .collect(),
         widths: vec![
             Constraint::Length(6),
             PID,
@@ -321,7 +343,13 @@ fn ports_section(ports: &[PortRow]) -> Section {
 /// go to the earlier sections first, and a header only shows with at least
 /// one row under it. Rows nobody needs are shared out so the boxes fill
 /// the area.
-fn stack<const N: usize>(frame: &mut Frame, sections: [Section; N], area: Rect, theme: &Theme) {
+fn stack<const N: usize>(
+    frame: &mut Frame,
+    sections: [Section; N],
+    area: Rect,
+    theme: &Theme,
+    focus: &mut Focus,
+) {
     let mut left = area.height;
     let mut heights = [0; N];
     for h in &mut heights {
@@ -345,34 +373,69 @@ fn stack<const N: usize>(frame: &mut Frame, sections: [Section; N], area: Rect, 
     }
     let areas: [Rect; N] = Layout::vertical(heights.map(Constraint::Length)).areas(area);
     for (section, area) in sections.into_iter().zip(areas) {
-        draw_section(frame, section, area, theme);
+        draw_section(frame, section, area, theme, focus);
     }
 }
 
-/// A thin rounded dim box with the title and count in its top border.
-fn draw_section(frame: &mut Frame, section: Section, area: Rect, theme: &Theme) {
+/// A thin rounded dim box with the title and count in its top border. The
+/// rows scroll to keep the cursor in view, and a last `+N more` line counts
+/// the rows below. The focused section's name takes the accent.
+fn draw_section(frame: &mut Frame, section: Section, area: Rect, theme: &Theme, focus: &mut Focus) {
+    let shows = focus.shows(section.pane);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(theme.dim)
         .padding(Padding::horizontal(1))
         .title(Line::from(vec![
-            Span::styled(format!(" {} ", section.name), theme.dim),
+            Span::styled(" ", theme.dim),
+            Span::styled(section.name, if shows { theme.accent } else { theme.dim }),
+            Span::styled(" ", theme.dim),
             Span::styled(
                 section.count.to_string(),
                 section.count_style.unwrap_or(theme.dim),
             ),
             Span::styled(" ", theme.dim),
         ]));
-    let table = Table::new(section.rows, section.widths)
+    let inner = block.inner(area);
+    // the header takes the first line
+    let lines = inner.height.saturating_sub(1);
+    let window = focus
+        .pane(section.pane)
+        .frame(section.keys, usize::from(lines));
+    let rows = section
+        .rows
+        .into_iter()
+        .skip(window.offset)
+        .take(window.rows);
+    let table = Table::new(rows, section.widths)
         .header(section.header.style(theme.dim))
+        .row_highlight_style(theme.selected)
         .block(block);
-    frame.render_widget(table, area);
+    let mut state = TableState::new()
+        .with_selected((shows && window.rows > 0).then(|| window.selected - window.offset));
+    frame.render_stateful_widget(table, area, &mut state);
+    if window.more > 0 {
+        let last = Rect {
+            y: inner.bottom() - 1,
+            height: 1,
+            ..inner
+        };
+        frame.render_widget(
+            Line::styled(format!("+{} more", window.more), theme.dim),
+            last,
+        );
+    }
 }
 
 fn draw_help(frame: &mut Frame) {
     let lines = [
+        "j k ↑ ↓  move the cursor",
+        "g G      first, last row",
+        "PgUp/Dn  move a page",
+        "Tab      next section",
+        "S-Tab    previous section",
+        "Esc      close help, hide cursor, else quit",
         "q        quit",
-        "Esc      close help, else quit",
         "?        toggle this help",
     ];
     let width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) + 4;
@@ -404,6 +467,10 @@ fn cut(text: &str, max: usize) -> String {
     let mut cut: String = text.chars().take(max.saturating_sub(1)).collect();
     cut.push('…');
     cut
+}
+
+fn key(pid: Pid, start: u64) -> Key {
+    (pid.as_u32().into(), start)
 }
 
 /// Right-aligned, so numbers line up by their last digit.
@@ -493,9 +560,10 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
-    use ratatui::style::Color;
+    use ratatui::style::{Color, Modifier};
 
     use crate::agents::{self, ProcInfo};
+    use crate::focus::Focus;
 
     const GIB: u64 = 1024 * 1024 * 1024;
 
@@ -545,12 +613,27 @@ mod tests {
     }
 
     fn draw((width, height): (u16, u16), procs: Vec<(Pid, ProcInfo)>, theme: Theme) -> Buffer {
+        let mut view = View {
+            help: false,
+            theme,
+            focus: Focus::default(),
+        };
+        draw_view((width, height), procs, &mut view)
+    }
+
+    /// Draws with `view`, so its cursor carries over to the next frame.
+    fn draw_view(
+        (width, height): (u16, u16),
+        procs: Vec<(Pid, ProcInfo)>,
+        view: &mut View,
+    ) -> Buffer {
         let procs: HashMap<Pid, ProcInfo> = procs.into_iter().collect();
         let agents = agents::scan(&procs, None);
         let orphans = [Orphan {
             pid: Pid::from_u32(9120),
             name: "node".into(),
             from: "claude/hum".into(),
+            start: 0,
             cpu: 0.0,
             mem: 48 << 20,
         }];
@@ -575,10 +658,34 @@ mod tests {
                 },
             ],
         };
-        let view = View { help: false, theme };
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|f| render(f, &screen, &view)).unwrap();
+        terminal.draw(|f| render(f, &screen, view)).unwrap();
         terminal.backend().buffer().clone()
+    }
+
+    fn text(buf: &Buffer) -> Vec<String> {
+        (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    /// The line the selected row's tint starts on.
+    fn selected_line(buf: &Buffer, theme: &Theme) -> Option<String> {
+        let lines = text(buf);
+        (0..buf.area.height)
+            .find(|&y| buf[(2, y)].bg == fg_or(theme.selected.bg))
+            .map(|y| lines[usize::from(y)].clone())
+    }
+
+    fn fg_or(color: Option<Color>) -> Color {
+        color.unwrap_or_default()
+    }
+
+    /// One claude session with `kids` children: 1 + `kids` agent rows.
+    fn big_tree(kids: u32) -> Vec<(Pid, ProcInfo)> {
+        let mut procs = vec![root_proc(4000, "claude", "/x/hum", 1 << 20)];
+        procs.extend((1..=kids).map(|i| child_proc(5000 + i, 4000, "mcp")));
+        procs
     }
 
     /// The color of the first cell where `text` first shows, `skip` chars in.
@@ -773,5 +880,103 @@ mod tests {
     fn narrow_panes_cut_project_before_process() {
         let lines = draw_lines((40, 9), mockup());
         assert!(lines[3].starts_with("│ claude "), "{lines:#?}");
+    }
+
+    #[test]
+    fn glance_view_shows_no_cursor_and_counts_hidden_rows() {
+        let theme = Theme::ayu_mirage();
+        let buf = draw((74, 16), big_tree(29), theme);
+        assert_eq!(selected_line(&buf, &theme), None);
+        let lines = text(&buf);
+        let shown = lines.iter().filter(|l| l.contains(" 500")).count();
+        let more = lines.iter().find_map(|l| {
+            l.strip_prefix("│ +")?
+                .split(' ')
+                .next()?
+                .parse::<usize>()
+                .ok()
+        });
+        assert!(lines[3].starts_with("│ process"), "{lines:#?}");
+        assert!(lines[4].starts_with("│ claude"), "{lines:#?}");
+        assert_eq!(Some(29 - shown), more, "{lines:#?}");
+    }
+
+    #[test]
+    fn cursor_reaches_the_last_of_30_agent_rows_in_74x9() {
+        let theme = Theme::ayu_mirage();
+        let mut view = View {
+            help: false,
+            theme,
+            focus: Focus::default(),
+        };
+        draw_view((74, 9), big_tree(29), &mut view);
+        view.focus.step(1);
+        for _ in 0..29 {
+            draw_view((74, 9), big_tree(29), &mut view);
+            view.focus.step(1);
+        }
+        let buf = draw_view((74, 9), big_tree(29), &mut view);
+        let line = selected_line(&buf, &theme).unwrap();
+        assert!(line.contains("5029"), "{line}");
+        assert!(!text(&buf).iter().any(|l| l.contains("more")));
+    }
+
+    #[test]
+    fn cursor_stays_on_its_process_when_rows_reorder() {
+        let theme = Theme::ayu_mirage();
+        let mut view = View {
+            help: false,
+            theme,
+            focus: Focus::default(),
+        };
+        draw_view((74, 16), mockup(), &mut view);
+        view.focus.step(1);
+        view.focus.step(1);
+        let buf = draw_view((74, 16), mockup(), &mut view);
+        assert!(selected_line(&buf, &theme).unwrap().contains("5871"));
+        // a new session sorts first and pushes 5871 down a row
+        let mut procs = mockup();
+        procs.push(root_proc(1000, "codex", "/x/new", 1 << 20));
+        let buf = draw_view((74, 16), procs, &mut view);
+        assert!(selected_line(&buf, &theme).unwrap().contains("5871"));
+    }
+
+    #[test]
+    fn tab_moves_the_cursor_to_orphans_and_leaves_agents() {
+        let theme = Theme::ayu_mirage();
+        let mut view = View {
+            help: false,
+            theme,
+            focus: Focus::default(),
+        };
+        draw_view((74, 16), mockup(), &mut view);
+        view.focus.cycle(1);
+        view.focus.step(1);
+        let buf = draw_view((74, 16), mockup(), &mut view);
+        assert!(selected_line(&buf, &theme).unwrap().contains("9120"));
+        assert_eq!(fg_at(&buf, "orphans 1", 1), fg(theme.accent));
+        assert_eq!(fg_at(&buf, "agents 3", 0), fg(theme.dim));
+        view.focus.cycle(-1);
+        let buf = draw_view((74, 16), mockup(), &mut view);
+        assert!(selected_line(&buf, &theme).unwrap().contains("4123"));
+    }
+
+    #[test]
+    fn no_color_reverses_the_selected_row() {
+        let mut view = View {
+            help: false,
+            theme: Theme::no_color(),
+            focus: Focus::default(),
+        };
+        draw_view((74, 16), mockup(), &mut view);
+        view.focus.step(1);
+        let buf = draw_view((74, 16), mockup(), &mut view);
+        let y = text(&buf).iter().position(|l| l.contains("4123")).unwrap();
+        // the tint spans the row, numbers and gaps alike
+        for x in 2..72 {
+            let cell = &buf[(x, y as u16)];
+            assert!(cell.modifier.contains(Modifier::REVERSED), "{x}");
+            assert_eq!((cell.fg, cell.bg), Default::default());
+        }
     }
 }
