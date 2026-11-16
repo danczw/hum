@@ -1,5 +1,6 @@
 mod agents;
 mod ports;
+mod theme;
 mod ui;
 
 use std::io;
@@ -12,6 +13,7 @@ use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 use agents::{Agent, Orphan, OrphanTracker};
 use ports::Listener;
+use theme::Theme;
 use ui::View;
 
 const TICK: Duration = Duration::from_secs(1);
@@ -39,7 +41,10 @@ impl App {
             tracker: OrphanTracker::default(),
             orphans: Vec::new(),
             ports: Vec::new(),
-            view: View { help: false },
+            view: View {
+                help: false,
+                theme: Theme::from_env(),
+            },
         })
     }
 
@@ -101,6 +106,7 @@ fn run(mut terminal: DefaultTerminal, app: &mut App) -> io::Result<()> {
                 KeyCode::Esc if view.help => view.help = false,
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                 KeyCode::Char('?') => view.help = !view.help,
+                KeyCode::Char('p') => view.theme = view.theme.flip(),
                 _ => {}
             }
         }
