@@ -1,34 +1,73 @@
+mod agents;
+mod ports;
+mod ui;
+
 use std::io;
 use std::time::{Duration, Instant};
 
+use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use ratatui::layout::{Constraint, Layout};
-use ratatui::style::{Color, Style};
-use ratatui::widgets::{Block, Gauge, Paragraph};
-use ratatui::{DefaultTerminal, Frame};
-use sysinfo::System;
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+
+use agents::{Agent, Orphan, OrphanTracker};
+use ports::Listener;
 
 const TICK: Duration = Duration::from_secs(1);
 
+struct App {
+    sys: System,
+    agents: Vec<Agent>,
+    tracker: OrphanTracker,
+    orphans: Vec<Orphan>,
+    ports: Vec<Listener>,
+}
+
+impl App {
+    fn new() -> io::Result<Self> {
+        Ok(Self {
+            sys: System::new().map_err(io::Error::other)?,
+            agents: Vec::new(),
+            tracker: OrphanTracker::default(),
+            orphans: Vec::new(),
+            ports: Vec::new(),
+        })
+    }
+
+    fn refresh(&mut self) {
+        self.sys.refresh_cpu_usage();
+        self.sys.refresh_memory();
+        self.sys.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing()
+                .with_cpu()
+                .with_memory()
+                .with_cmd(UpdateKind::OnlyIfNotSet),
+        );
+        self.agents = agents::scan(&self.sys);
+        self.orphans = self.tracker.update(&self.sys, &self.agents);
+        self.ports = ports::listening();
+    }
+}
+
 fn main() -> io::Result<()> {
+    let mut app = App::new()?;
     let terminal = ratatui::init();
-    let result = run(terminal);
+    let result = run(terminal, &mut app);
     ratatui::restore();
     result
 }
 
-fn run(mut terminal: DefaultTerminal) -> io::Result<()> {
-    let mut sys = System::new().map_err(io::Error::other)?;
+fn run(mut terminal: DefaultTerminal, app: &mut App) -> io::Result<()> {
     let mut last_tick = Instant::now() - TICK;
 
     loop {
         if last_tick.elapsed() >= TICK {
-            sys.refresh_cpu_usage();
-            sys.refresh_memory();
+            app.refresh();
             last_tick = Instant::now();
         }
 
-        terminal.draw(|frame| draw(frame, &sys))?;
+        terminal.draw(|frame| ui::draw(frame, app))?;
 
         let timeout = TICK.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)?
@@ -39,63 +78,4 @@ fn run(mut terminal: DefaultTerminal) -> io::Result<()> {
             return Ok(());
         }
     }
-}
-
-fn draw(frame: &mut Frame, sys: &System) {
-    let [cpu, mem, swap, _, footer] = Layout::vertical([
-        Constraint::Length(3),
-        Constraint::Length(3),
-        Constraint::Length(3),
-        Constraint::Min(0),
-        Constraint::Length(1),
-    ])
-    .areas(frame.area());
-
-    let cpu_pct = f64::from(sys.global_cpu_usage()) / 100.0;
-    frame.render_widget(
-        gauge("cpu", cpu_pct, format!("{:.1}%", cpu_pct * 100.0), Color::Cyan),
-        cpu,
-    );
-
-    frame.render_widget(
-        gauge(
-            "mem",
-            ratio(sys.used_memory(), sys.total_memory()),
-            usage_label(sys.used_memory(), sys.total_memory()),
-            Color::Magenta,
-        ),
-        mem,
-    );
-
-    frame.render_widget(
-        gauge(
-            "swap",
-            ratio(sys.used_swap(), sys.total_swap()),
-            usage_label(sys.used_swap(), sys.total_swap()),
-            Color::Yellow,
-        ),
-        swap,
-    );
-
-    frame.render_widget(
-        Paragraph::new(" q quit").style(Style::new().fg(Color::DarkGray)),
-        footer,
-    );
-}
-
-fn gauge(title: &str, ratio: f64, label: String, color: Color) -> Gauge<'static> {
-    Gauge::default()
-        .block(Block::bordered().title(format!(" {title} ")))
-        .gauge_style(Style::new().fg(color))
-        .ratio(ratio.clamp(0.0, 1.0))
-        .label(label)
-}
-
-fn ratio(used: u64, total: u64) -> f64 {
-    if total == 0 { 0.0 } else { used as f64 / total as f64 }
-}
-
-fn usage_label(used: u64, total: u64) -> String {
-    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
-    format!("{:.1} / {:.1} GiB", used as f64 / GIB, total as f64 / GIB)
 }
