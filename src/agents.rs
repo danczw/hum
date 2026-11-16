@@ -83,7 +83,7 @@ fn walk(
     let Some(p) = sys.process(pid) else { return };
     out.push(Proc {
         pid,
-        name: p.name().to_string_lossy().into_owned(),
+        name: proc_name(p),
         cpu: p.cpu_usage(),
         mem: p.memory(),
         depth,
@@ -138,6 +138,16 @@ fn match_agent(name: &OsStr) -> Option<&'static str> {
     AGENTS.iter().copied().find(|a| OsStr::new(a) == name)
 }
 
+/// sysinfo keeps a pid's name from before an exec, but cmd is re-read every
+/// tick, so name the process after what it runs now.
+pub fn proc_name(p: &Process) -> String {
+    p.cmd()
+        .first()
+        .map_or(p.name(), |a| basename(a))
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn basename(arg: &OsStr) -> &OsStr {
     Path::new(arg).file_name().unwrap_or(arg)
 }
@@ -187,7 +197,7 @@ impl OrphanTracker {
                 let p = sys.process(*pid)?;
                 Some(Orphan {
                     pid: *pid,
-                    name: p.name().to_string_lossy().into_owned(),
+                    name: proc_name(p),
                     agent,
                     cpu: p.cpu_usage(),
                     mem: p.memory(),

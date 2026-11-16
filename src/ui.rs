@@ -112,7 +112,7 @@ fn draw_ports(frame: &mut Frame, app: &App, area: Rect) {
             let name = l
                 .pid
                 .and_then(|pid| app.sys.process(pid))
-                .map(|p| p.name().to_string_lossy().into_owned())
+                .map(crate::agents::proc_name)
                 .unwrap_or_default();
             let pid = l.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".into());
             let owner = l
