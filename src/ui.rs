@@ -18,17 +18,17 @@ const CORES: Constraint = Constraint::Length(5);
 /// `fmt_bytes` up to `1023.9M`.
 const MEM: Constraint = Constraint::Length(7);
 /// Agent process names, tree indent included, get at least this many chars.
-const PROCESS: u16 = 14;
+const PROCESS: u16 = 12;
 /// Project names get at least this many chars.
-const PROJECT: u16 = 10;
+const PROJECT: u16 = 9;
 /// The agents box without its name columns: pid, cores, mem, four gaps, two
-/// borders.
-const AGENTS_FIXED: u16 = 7 + 5 + 7 + 4 + 2;
+/// borders and a blank column inside each.
+const AGENTS_FIXED: u16 = 7 + 5 + 7 + 4 + 2 + 2;
 /// The agents box with both names at their minimum.
 const AGENTS_MIN: u16 = PROCESS + PROJECT + AGENTS_FIXED;
 /// Fits a whole orphan row such as `9120 node claude/hum 0.00 48.0M` and
 /// the `process` header.
-const SIDE_MIN: u16 = 44;
+const SIDE_MIN: u16 = 45;
 /// Narrower panes stack the sections; wider ones put orphans and ports in a
 /// right-hand column.
 const WIDE: u16 = AGENTS_MIN + SIDE_MIN;
@@ -181,12 +181,13 @@ fn draw_gauges(frame: &mut Frame, screen: &Screen, area: Rect) {
     }
 }
 
-/// `width` is the whole box. Process and project split the width the
-/// numbers leave 3:2, and names longer than their column end in `…`.
+/// `width` is the whole box. Width beyond both names' minimum goes 3:1 to
+/// process and project, and names longer than their column end in `…`.
 fn agents_section(agents: &[Agent], width: u16) -> Section {
     let names = width.saturating_sub(AGENTS_FIXED);
-    let process = names * 3 / 5;
-    let (process_max, project_max) = (usize::from(process), usize::from(names - process));
+    let project = PROJECT.min(names) + names.saturating_sub(PROCESS + PROJECT) / 4;
+    let process = names - project;
+    let (process_max, project_max) = (usize::from(process), usize::from(project));
     let rows = agents
         .iter()
         .flat_map(|agent| {
@@ -228,7 +229,7 @@ fn agents_section(agents: &[Agent], width: u16) -> Section {
         rows,
         widths: vec![
             Constraint::Length(process),
-            Constraint::Length(names - process),
+            Constraint::Length(project),
             PID,
             CORES,
             MEM,
@@ -334,6 +335,7 @@ fn draw_section(frame: &mut Frame, section: Section, area: Rect) {
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(DIM)
+        .padding(Padding::horizontal(1))
         .title(Line::styled(
             format!(" {} {} ", section.name, section.count),
             DIM,
@@ -551,8 +553,8 @@ mod tests {
             assert!(lines[0].contains(label), "{label:?} in {}", lines[0]);
         }
         assert_eq!(lines[1], format!("╭ agents 3 {}╮", "─".repeat(62)));
-        assert!(lines[2].starts_with("│process") && lines[2].ends_with("mem│"));
-        assert!(lines[3].starts_with("│claude") && lines[3].ends_with("310.0M│"));
+        assert!(lines[2].starts_with("│ process") && lines[2].ends_with("mem │"));
+        assert!(lines[3].starts_with("│ claude") && lines[3].ends_with("310.0M │"));
         assert_eq!(lines[4], format!("╰{}╯", "─".repeat(72)));
         assert_eq!(lines[5], format!("╭ orphans 1 {}╮", "─".repeat(61)));
         assert_eq!(lines[7], format!("╭ ports 2 {}╮", "─".repeat(63)));
@@ -595,7 +597,7 @@ mod tests {
                 .join(" ")
         };
         assert_eq!(words(&lines[3]), "process project pid cores mem");
-        assert!(lines[4].starts_with("│claude"), "{}", lines[4]);
+        assert!(lines[4].starts_with("│ claude"), "{}", lines[4]);
     }
 
     #[test]
@@ -614,7 +616,7 @@ mod tests {
             lines[2]
         );
         assert!(
-            lines.iter().any(|l| l.starts_with("│  └ rust-anal… ")),
+            lines.iter().any(|l| l.starts_with("│   └ rust-an… ")),
             "{lines:#?}"
         );
         let pid_end = |pid: &str| {
@@ -623,7 +625,7 @@ mod tests {
         };
         assert_eq!(pid_end("9342"), pid_end("4123"), "{lines:#?}");
         assert!(
-            lines.iter().any(|l| l.contains(" claude-co… ")),
+            lines.iter().any(|l| l.contains(" claude-c… ")),
             "{lines:#?}"
         );
         // the orphan row keeps its whole `from`
