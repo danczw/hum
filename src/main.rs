@@ -51,8 +51,9 @@ impl App {
                 .with_cmd(UpdateKind::Always)
                 .without_tasks(),
         );
-        self.agents = agents::scan(&self.sys);
-        self.orphans = self.tracker.update(&self.sys, &self.agents);
+        let procs = agents::snapshot(&self.sys);
+        self.agents = agents::scan(&procs);
+        self.orphans = self.tracker.update(&procs, &self.agents);
         if self.ticks.is_multiple_of(PORT_TICKS) {
             self.ports = ports::listening(&self.sys);
         }
