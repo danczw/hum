@@ -137,6 +137,13 @@ impl Focus {
         }
     }
 
+    /// Moves focus off a section whose rows all went away.
+    pub fn settle(&mut self) {
+        if self.active && self.panes[self.focused].keys.is_empty() {
+            self.cycle(1);
+        }
+    }
+
     /// Hides the cursor and scrolls back to the top. False when the cursor
     /// was not showing.
     pub fn clear(&mut self) -> bool {
@@ -272,6 +279,18 @@ mod tests {
         agents(&mut focus, [], 4);
         focus.pane(2).frame(Vec::new(), 4);
         focus.cycle(1);
+        assert!(focus.shows(0));
+    }
+
+    #[test]
+    fn focus_leaves_a_section_whose_rows_went_away() {
+        let mut focus = Focus::default();
+        agents(&mut focus, 0..3, 4);
+        focus.pane(2).frame(keys(0..1), 4);
+        focus.cycle(-1);
+        assert!(focus.shows(2));
+        focus.pane(2).frame(Vec::new(), 4);
+        focus.settle();
         assert!(focus.shows(0));
     }
 
