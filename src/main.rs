@@ -13,9 +13,12 @@ use agents::{Agent, Orphan, OrphanTracker};
 use ports::Listener;
 
 const TICK: Duration = Duration::from_secs(1);
+/// Ports change rarely and resolving owners reads every fd in /proc.
+const PORT_TICKS: u32 = 5;
 
 struct App {
     sys: System,
+    ticks: u32,
     agents: Vec<Agent>,
     tracker: OrphanTracker,
     orphans: Vec<Orphan>,
@@ -26,6 +29,7 @@ impl App {
     fn new() -> io::Result<Self> {
         Ok(Self {
             sys: System::new().map_err(io::Error::other)?,
+            ticks: 0,
             agents: Vec::new(),
             tracker: OrphanTracker::default(),
             orphans: Vec::new(),
@@ -49,7 +53,10 @@ impl App {
         );
         self.agents = agents::scan(&self.sys);
         self.orphans = self.tracker.update(&self.sys, &self.agents);
-        self.ports = ports::listening(&self.sys);
+        if self.ticks.is_multiple_of(PORT_TICKS) {
+            self.ports = ports::listening(&self.sys);
+        }
+        self.ticks = self.ticks.wrapping_add(1);
     }
 }
 
