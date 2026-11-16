@@ -130,3 +130,50 @@ fn socket_holders(wanted: &HashSet<u64>) -> HashMap<u64, Vec<Pid>> {
     }
     holders
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Rows from a little-endian host.
+    const HEADER: &str = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode";
+    const LOOPBACK: &str = "   1: 0100007F:1F40 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 4296 1 0000000000000000 100 0 0 10 0";
+    const ANY: &str = "   0: 00000000:0BB8 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 5120 1 0000000000000000 100 0 0 10 0";
+    const ESTABLISHED: &str = "   2: 0100007F:1F40 0100007F:D2F0 01 00000000:00000000 00:00000000 00000000  1000        0 6001 1 0000000000000000 20 4 30 10 -1";
+    const LOOPBACK6: &str = "   0: 00000000000000000000000001000000:1F90 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 7002 1 0000000000000000 100 0 0 10 0";
+    const ANY6: &str = "   1: 00000000000000000000000000000000:0016 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 7003 1 0000000000000000 100 0 0 10 0";
+
+    #[test]
+    fn ipv4_rows() {
+        assert_eq!(
+            parse_line(LOOPBACK),
+            Some(TcpSocket {
+                addr: Ipv4Addr::LOCALHOST.into(),
+                port: 8000,
+                state: TCP_LISTEN,
+                inode: 4296,
+            })
+        );
+        let any = parse_line(ANY).unwrap();
+        assert_eq!((any.addr, any.port), (Ipv4Addr::UNSPECIFIED.into(), 3000));
+        assert_eq!(parse_line(ESTABLISHED).unwrap().state, 0x01);
+    }
+
+    #[test]
+    fn ipv6_rows() {
+        let lo = parse_line(LOOPBACK6).unwrap();
+        assert_eq!(
+            (lo.addr, lo.port, lo.inode),
+            (Ipv6Addr::LOCALHOST.into(), 8080, 7002)
+        );
+        let any = parse_line(ANY6).unwrap();
+        assert_eq!((any.addr, any.port), (Ipv6Addr::UNSPECIFIED.into(), 22));
+    }
+
+    #[test]
+    fn header_and_short_rows() {
+        assert_eq!(parse_line(HEADER), None);
+        assert_eq!(parse_line(""), None);
+        assert_eq!(parse_line("   0: 0100007F:1F40 00000000:0000 0A"), None);
+    }
+}
