@@ -26,6 +26,8 @@ const PROJECT: u16 = 9;
 const AGENTS_FIXED: u16 = 7 + 5 + 7 + 4 + 2 + 2;
 /// The agents box with both names at their minimum.
 const AGENTS_MIN: u16 = PROCESS + PROJECT + AGENTS_FIXED;
+/// Orphan process names are cut to the width of their `process` header.
+const ORPHAN_NAME: usize = 7;
 /// Fits a whole orphan row such as `9120 node claude/hum 0.00 48.0M` and
 /// the `process` header.
 const SIDE_MIN: u16 = 45;
@@ -144,7 +146,8 @@ fn draw_gauges(frame: &mut Frame, screen: &Screen, area: Rect) {
         (
             "cpu",
             screen.cpu,
-            format!("{:>3.0}%", screen.cpu * 100.0),
+            // as wide as `100%` so the bars do not jitter
+            format!("{:>4}", format!("{:.0}%", screen.cpu * 100.0)),
             Color::Cyan,
         ),
         (
@@ -185,7 +188,9 @@ fn draw_gauges(frame: &mut Frame, screen: &Screen, area: Rect) {
 /// process and project, and names longer than their column end in `…`.
 fn agents_section(agents: &[Agent], width: u16) -> Section {
     let names = width.saturating_sub(AGENTS_FIXED);
-    let project = PROJECT.min(names) + names.saturating_sub(PROCESS + PROJECT) / 4;
+    // below both minimums project gives way first
+    let project =
+        names.saturating_sub(PROCESS).min(PROJECT) + names.saturating_sub(PROCESS + PROJECT) / 4;
     let process = names - project;
     let (process_max, project_max) = (usize::from(process), usize::from(project));
     let rows = agents
@@ -243,7 +248,7 @@ fn orphans_section(orphans: &[Orphan]) -> Section {
         .map(|o| {
             Row::new([
                 num(o.pid.to_string()),
-                Cell::from(o.name.clone()),
+                Cell::from(cut(&o.name, ORPHAN_NAME)),
                 Cell::from(o.from.clone()),
                 num(fmt_cores(o.cpu)),
                 num(fmt_bytes(o.mem)),
@@ -263,7 +268,13 @@ fn orphans_section(orphans: &[Orphan]) -> Section {
         ]),
         rows,
         // name as wide as its `process` header; `from` takes the rest
-        widths: vec![PID, Constraint::Length(7), Constraint::Fill(1), CORES, MEM],
+        widths: vec![
+            PID,
+            Constraint::Length(ORPHAN_NAME as u16),
+            Constraint::Fill(1),
+            CORES,
+            MEM,
+        ],
     }
 }
 
@@ -381,6 +392,9 @@ fn cut(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
     }
+    if max == 0 {
+        return String::new();
+    }
     let mut cut: String = text.chars().take(max.saturating_sub(1)).collect();
     cut.push('…');
     cut
@@ -413,11 +427,15 @@ fn ratio((used, total): (u64, u64)) -> f64 {
 }
 
 /// `12.1/31G`, padded to the width of a full one so the bar does not jitter.
+/// The total drops a trailing `.0` (`8G`) but keeps other decimals, so a
+/// 400M swapfile reads `0.4G`, not `0G`.
 fn usage_label((used, total): (u64, u64)) -> String {
     const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
-    let label = |used: u64| format!("{:.1}/{:.0}G", used as f64 / GIB, total as f64 / GIB);
-    let width = label(total).len();
-    format!("{:>width$}", label(used))
+    let total = format!("{:.1}", total as f64 / GIB);
+    let total = total.strip_suffix(".0").unwrap_or(&total);
+    let label = |used: f64| format!("{used:.1}/{total}G");
+    let width = label(total.parse().unwrap_or(0.0)).len();
+    format!("{:>width$}", label(used as f64 / GIB))
 }
 
 /// A bar `width` cells wide in eighths of a cell: each braille cell fills its
@@ -671,5 +689,11 @@ mod tests {
             .iter()
             .position(|l| l.ends_with('╯') && l.matches('╰').count() == 1);
         assert!(orphans_end.is_some_and(|y| y > 5), "{lines:#?}");
+    }
+
+    #[test]
+    fn narrow_panes_cut_project_before_process() {
+        let lines = draw_lines((40, 9), mockup());
+        assert!(lines[3].starts_with("│ claude "), "{lines:#?}");
     }
 }
