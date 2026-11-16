@@ -339,10 +339,11 @@ fn ports_section(ports: &[PortRow]) -> Section {
     }
 }
 
-/// Stacks sections top to bottom. Every section keeps its title; data rows
-/// go to the earlier sections first, and a header only shows with at least
-/// one row under it. Rows nobody needs are shared out so the boxes fill
-/// the area.
+/// Stacks sections top to bottom. Every section keeps its title. The
+/// focused section first gets a line for its cursor, then data rows go to
+/// the earlier sections first, and a header only shows with at least one
+/// row under it. Rows nobody needs are shared out so the boxes fill the
+/// area.
 fn stack<const N: usize>(
     frame: &mut Frame,
     sections: [Section; N],
@@ -356,13 +357,13 @@ fn stack<const N: usize>(
         *h = BOX.min(left);
         left -= *h;
     }
-    // header and data lines; the focused section first gets its header and
-    // a line for the cursor
+    // header and data lines; with one line the cursor row goes without its
+    // header, see `draw_section`
     let mut lines = [0; N];
     for (l, section) in lines.iter_mut().zip(&sections) {
-        if focus.shows(section.pane) && !section.rows.is_empty() && left >= 2 {
-            *l = 2;
-            left -= 2;
+        if focus.shows(section.pane) && !section.rows.is_empty() {
+            *l = left.min(2);
+            left -= *l;
         }
     }
     for (l, section) in lines.iter_mut().zip(&sections) {
@@ -405,8 +406,9 @@ fn draw_section(frame: &mut Frame, section: Section, area: Rect, theme: &Theme, 
             Span::styled(" ", theme.dim),
         ]));
     let inner = block.inner(area);
-    // the header takes the first line
-    let lines = inner.height.saturating_sub(1);
+    // a single line goes to a row, not to a header with nothing under it
+    let header = inner.height >= 2 || section.keys.is_empty();
+    let lines = inner.height.saturating_sub(u16::from(header));
     let window = focus
         .pane(section.pane)
         .frame(section.keys, usize::from(lines));
@@ -415,10 +417,12 @@ fn draw_section(frame: &mut Frame, section: Section, area: Rect, theme: &Theme, 
         .into_iter()
         .skip(window.offset)
         .take(window.rows);
-    let table = Table::new(rows, section.widths)
-        .header(section.header.style(theme.dim))
+    let mut table = Table::new(rows, section.widths)
         .row_highlight_style(theme.selected)
         .block(block);
+    if header {
+        table = table.header(section.header.style(theme.dim));
+    }
     let mut state = TableState::new()
         .with_selected((shows && window.rows > 0).then(|| window.selected - window.offset));
     frame.render_stateful_widget(table, area, &mut state);
@@ -681,7 +685,15 @@ mod tests {
     fn selected_line(buf: &Buffer, theme: &Theme) -> Option<String> {
         let lines = text(buf);
         (0..buf.area.height)
-            .find(|&y| Some(buf[(2, y)].bg) == theme.selected.bg)
+            .find(|&y| {
+                let cell = &buf[(2, y)];
+                theme
+                    .selected
+                    .bg
+                    .map_or(cell.modifier.contains(Modifier::REVERSED), |bg| {
+                        cell.bg == bg
+                    })
+            })
             .map(|y| lines[usize::from(y)].clone())
     }
 
@@ -937,6 +949,31 @@ mod tests {
         view.focus.cycle(1);
         let buf = draw_view((74, 9), big_tree(29), &mut view);
         assert!(selected_line(&buf, &theme).unwrap().contains("9120"));
+    }
+
+    #[test]
+    fn short_panes_show_a_row_without_its_header() {
+        let theme = Theme::ayu_mirage();
+        for height in [8, 10] {
+            let mut view = View {
+                help: false,
+                theme,
+                focus: Focus::default(),
+            };
+            draw_view((74, height), big_tree(29), &mut view);
+            view.focus.cycle(1);
+            let buf = draw_view((74, height), big_tree(29), &mut view);
+            let lines = text(&buf);
+            assert!(
+                selected_line(&buf, &theme).unwrap().contains("9120"),
+                "{lines:#?}"
+            );
+            for (i, line) in lines.iter().enumerate() {
+                if line.starts_with("│ process") {
+                    assert!(!lines[i + 1].starts_with('╰'), "{lines:#?}");
+                }
+            }
+        }
     }
 
     #[test]
