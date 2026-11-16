@@ -21,9 +21,8 @@ const MEM: Constraint = Constraint::Length(7);
 /// right-hand column.
 const WIDE: u16 = 100;
 
-/// From this height up the gauge line gets a blank row above and below. In
-/// shorter panes those rows go to data: at 74x9 they would leave rounded
-/// sections with no agent rows.
+/// From this height up a blank row separates the gauge line from the
+/// sections. In shorter panes that row goes to data.
 const AIRY: u16 = 12;
 
 const DIM: Style = Style::new().fg(Color::DarkGray);
@@ -90,11 +89,11 @@ struct PortRow {
     owner: Option<String>,
 }
 
-/// A titled list of rows; column meaning comes from position and units, the
-/// help overlay names the columns.
+/// A titled list of rows under a dim header naming the columns.
 struct Section {
     name: &'static str,
     count: usize,
+    header: Row<'static>,
     rows: Vec<Row<'static>>,
     widths: Vec<Constraint>,
 }
@@ -131,8 +130,7 @@ fn screen(app: &App) -> Screen<'_> {
 
 fn render(frame: &mut Frame, screen: &Screen, view: &View) {
     let pad = u16::from(frame.area().height >= AIRY);
-    let [_, gauges, _, body] = Layout::vertical([
-        Constraint::Length(pad),
+    let [gauges, _, body] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(pad),
         Constraint::Fill(1),
@@ -231,6 +229,13 @@ fn agents_section(agents: &[Agent]) -> Section {
     Section {
         name: "agents",
         count: agents.len(),
+        header: Row::new([
+            Cell::from("process"),
+            Cell::from("project"),
+            num("pid".into()),
+            num("cores".into()),
+            num("mem".into()),
+        ]),
         rows,
         widths: vec![Constraint::Fill(2), Constraint::Fill(1), PID, CORES, MEM],
     }
@@ -253,6 +258,13 @@ fn orphans_section(orphans: &[Orphan]) -> Section {
     Section {
         name: "orphans",
         count: orphans.len(),
+        header: Row::new([
+            num("pid".into()),
+            Cell::from("process"),
+            Cell::from("from"),
+            num("cores".into()),
+            num("mem".into()),
+        ]),
         rows,
         widths: vec![PID, Constraint::Fill(1), Constraint::Fill(2), CORES, MEM],
     }
@@ -279,6 +291,12 @@ fn ports_section(ports: &[PortRow]) -> Section {
     Section {
         name: "ports",
         count: ports.len(),
+        header: Row::new([
+            Cell::from("port"),
+            num("pid".into()),
+            Cell::from("process"),
+            Cell::from("agent"),
+        ]),
         rows,
         widths: vec![
             Constraint::Length(6),
@@ -290,7 +308,8 @@ fn ports_section(ports: &[PortRow]) -> Section {
 }
 
 /// Stacks sections top to bottom. Every section keeps its title; data rows
-/// go to the earlier sections first.
+/// go to the earlier sections first, and a header only shows with at least
+/// one row under it.
 fn stack<const N: usize>(frame: &mut Frame, sections: [Section; N], area: Rect, chrome: Chrome) {
     let mut left = area.height;
     let mut heights = [0; N];
@@ -299,7 +318,10 @@ fn stack<const N: usize>(frame: &mut Frame, sections: [Section; N], area: Rect, 
         left -= *h;
     }
     for (h, section) in heights.iter_mut().zip(&sections) {
-        let rows = u16::try_from(section.rows.len())
+        if section.rows.is_empty() || left < 2 {
+            continue;
+        }
+        let rows = u16::try_from(section.rows.len() + 1)
             .unwrap_or(u16::MAX)
             .min(left);
         *h += rows;
@@ -313,7 +335,7 @@ fn stack<const N: usize>(frame: &mut Frame, sections: [Section; N], area: Rect, 
 
 fn draw_section(frame: &mut Frame, section: Section, area: Rect, chrome: Chrome) {
     let title = format!("{} {}", section.name, section.count);
-    let table = Table::new(section.rows, section.widths);
+    let table = Table::new(section.rows, section.widths).header(section.header.style(DIM));
     match chrome {
         Chrome::Borderless => {
             let [head, body] =
@@ -338,9 +360,6 @@ fn draw_help(frame: &mut Frame) {
         "Esc      close help, else quit",
         "?        toggle this help",
         "b        toggle borders (dev)",
-        "agents   process  project  pid  cores  mem",
-        "orphans  pid  process  from  cores  mem",
-        "ports    port  pid  process  agent",
     ];
     let width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) + 4;
     let [area] = Layout::horizontal([Constraint::Length(width as u16)])
@@ -522,12 +541,12 @@ mod tests {
             assert!(lines[0].contains(label), "{label:?} in {}", lines[0]);
         }
         assert_eq!(lines[1], format!("agents 3 {}", "─".repeat(65)));
-        assert!(lines[2].starts_with("claude") && lines[2].ends_with("310.0M"));
-        assert!(lines[4].starts_with("codex") && lines[4].contains("dots"));
-        assert_eq!(lines[5], format!("orphans 1 {}", "─".repeat(64)));
-        assert!(lines[6].contains("claude/hum") && lines[6].ends_with("48.0M"));
+        assert!(lines[2].starts_with("process") && lines[2].ends_with("mem"));
+        assert!(lines[3].starts_with("claude") && lines[3].ends_with("310.0M"));
+        assert!(lines[5].starts_with("codex") && lines[5].contains("dots"));
+        // One row left is too few for a header and a data row.
+        assert_eq!(lines[6], format!("orphans 1 {}", "─".repeat(64)));
         assert_eq!(lines[7], format!("ports 2 {}", "─".repeat(66)));
-        assert!(lines[8].starts_with(":3000") && lines[8].contains("claude/hum"));
     }
 
     #[test]
@@ -535,8 +554,8 @@ mod tests {
         let lines = lines(Chrome::Rounded);
         assert!(lines[0].starts_with("cpu ⣿"), "{}", lines[0]);
         assert_eq!(lines[1], format!("╭ agents 3 {}╮", "─".repeat(62)));
-        assert!(lines[2].starts_with("│claude") && lines[2].ends_with("310.0M│"));
-        assert!(lines[3].starts_with("│claude"));
+        assert!(lines[2].starts_with("│process") && lines[2].ends_with("mem│"));
+        assert!(lines[3].starts_with("│claude") && lines[3].ends_with("310.0M│"));
         assert_eq!(lines[4], format!("╰{}╯", "─".repeat(72)));
         assert_eq!(lines[5], format!("╭ orphans 1 {}╮", "─".repeat(61)));
         assert_eq!(lines[7], format!("╭ ports 2 {}╮", "─".repeat(63)));
@@ -562,11 +581,23 @@ mod tests {
     }
 
     #[test]
-    fn gauges_get_blank_rows_around_them_when_rows_allow() {
+    fn gauges_get_a_blank_row_below_when_rows_allow() {
         let lines = lines_at(Chrome::Rounded, 16);
-        assert_eq!(lines[0].trim(), "");
-        assert!(lines[1].starts_with("cpu ⣿"), "{}", lines[1]);
-        assert_eq!(lines[2].trim(), "");
-        assert!(lines[3].starts_with("╭ agents 3 "), "{}", lines[3]);
+        assert!(lines[0].starts_with("cpu ⣿"), "{}", lines[0]);
+        assert_eq!(lines[1].trim(), "");
+        assert!(lines[2].starts_with("╭ agents 3 "), "{}", lines[2]);
+    }
+
+    #[test]
+    fn sections_name_their_columns() {
+        let lines = lines_at(Chrome::Rounded, 16);
+        let words = |l: &str| {
+            l.split(['│', ' '])
+                .filter(|w| !w.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        assert_eq!(words(&lines[3]), "process project pid cores mem");
+        assert!(lines[4].starts_with("│claude"), "{}", lines[4]);
     }
 }

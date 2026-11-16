@@ -13,7 +13,7 @@ A small terminal monitor for machines running coding agents. Built with [ratatui
 cargo run --release
 ```
 
-Keys: `q` quits, `?` lists keys and columns, `b` switches between borderless and rounded sections (also `HUM_STYLE=borderless|rounded`, a dev toggle until one style is picked).
+Keys: `q` quits, `?` lists keys, `b` switches between borderless and rounded sections (also `HUM_STYLE=borderless|rounded`, a dev toggle until one style is picked).
 
 ## License
 
