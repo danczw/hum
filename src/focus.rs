@@ -124,9 +124,14 @@ impl Focus {
     }
 
     /// Moves focus `by` sections, wrapping and passing over sections
-    /// without rows, and shows the cursor.
+    /// without rows. The first press only shows the cursor, in agents.
     pub fn cycle(&mut self, by: isize) {
-        self.active = true;
+        if std::mem::replace(&mut self.active, true) {
+            self.advance(by);
+        }
+    }
+
+    fn advance(&mut self, by: isize) {
         let mut next = self.focused;
         for _ in 1..SECTIONS {
             next = (next as isize + by).rem_euclid(SECTIONS as isize) as usize;
@@ -140,7 +145,7 @@ impl Focus {
     /// Moves focus off a section whose rows all went away.
     pub fn settle(&mut self) {
         if self.active && self.panes[self.focused].keys.is_empty() {
-            self.cycle(1);
+            self.advance(1);
         }
     }
 
@@ -256,6 +261,8 @@ mod tests {
         agents(&mut focus, 0..10, 4);
         focus.pane(1).frame(keys(0..3), 4);
         focus.cycle(1);
+        assert!(focus.shows(0));
+        focus.cycle(1);
         assert!(focus.shows(1));
         focus.step(1);
         assert_eq!(focus.pane(1).frame(keys(0..3), 4).selected, 1);
@@ -272,6 +279,7 @@ mod tests {
         focus.pane(1).frame(Vec::new(), 4);
         focus.pane(2).frame(keys(0..1), 4);
         focus.cycle(1);
+        focus.cycle(1);
         assert!(focus.shows(2));
         focus.cycle(1);
         assert!(focus.shows(0));
@@ -287,6 +295,7 @@ mod tests {
         let mut focus = Focus::default();
         agents(&mut focus, 0..3, 4);
         focus.pane(2).frame(keys(0..1), 4);
+        focus.cycle(-1);
         focus.cycle(-1);
         assert!(focus.shows(2));
         focus.pane(2).frame(Vec::new(), 4);

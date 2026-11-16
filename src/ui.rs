@@ -948,6 +948,7 @@ mod tests {
         };
         draw_view((74, 9), big_tree(29), &mut view);
         view.focus.cycle(1);
+        view.focus.cycle(1);
         let buf = draw_view((74, 9), big_tree(29), &mut view);
         assert!(selected_line(&buf, &theme).unwrap().contains("9120"));
     }
@@ -962,6 +963,7 @@ mod tests {
                 focus: Focus::default(),
             };
             draw_view((74, height), big_tree(29), &mut view);
+            view.focus.cycle(1);
             view.focus.cycle(1);
             let buf = draw_view((74, height), big_tree(29), &mut view);
             let lines = text(&buf);
@@ -1006,6 +1008,10 @@ mod tests {
             focus: Focus::default(),
         };
         draw_view((74, 16), mockup(), &mut view);
+        // the first Tab shows the cursor in agents
+        view.focus.cycle(1);
+        let buf = draw_view((74, 16), mockup(), &mut view);
+        assert!(selected_line(&buf, &theme).unwrap().contains("4123"));
         view.focus.cycle(1);
         view.focus.step(1);
         let buf = draw_view((74, 16), mockup(), &mut view);
