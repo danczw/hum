@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -16,40 +14,30 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Constraint::Length(1),
     ])
     .areas(frame.area());
-    let [cpu, mem, swap] = Layout::horizontal([Constraint::Ratio(1, 3); 3]).areas(gauges);
     let [agents, side] =
         Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(body);
     let [ports, orphans] = Layout::vertical([Constraint::Percentage(50); 2]).areas(side);
 
     let sys = &app.sys;
-    let cpu_pct = f64::from(sys.global_cpu_usage()) / 100.0;
-    frame.render_widget(
-        gauge(
-            "cpu",
-            cpu_pct,
-            format!("{:.1}%", cpu_pct * 100.0),
-            Color::Cyan,
-        ),
-        cpu,
+    let cpu = f64::from(sys.global_cpu_usage()) / 100.0;
+    let (mem, swap) = (
+        (sys.used_memory(), sys.total_memory()),
+        (sys.used_swap(), sys.total_swap()),
     );
-    frame.render_widget(
-        gauge(
-            "mem",
-            ratio(sys.used_memory(), sys.total_memory()),
-            usage_label(sys.used_memory(), sys.total_memory()),
-            Color::Magenta,
-        ),
-        mem,
-    );
-    frame.render_widget(
-        gauge(
-            "swap",
-            ratio(sys.used_swap(), sys.total_swap()),
-            usage_label(sys.used_swap(), sys.total_swap()),
-            Color::Yellow,
-        ),
-        swap,
-    );
+    let gauge_data = [
+        ("cpu", cpu, format!("{:.1}%", cpu * 100.0), Color::Cyan),
+        ("mem", ratio(mem), usage_label(mem), Color::Magenta),
+        ("swap", ratio(swap), usage_label(swap), Color::Yellow),
+    ];
+    let areas: [Rect; 3] = Layout::horizontal([Constraint::Ratio(1, 3); 3]).areas(gauges);
+    for ((title, ratio, label, color), area) in gauge_data.into_iter().zip(areas) {
+        let gauge = Gauge::default()
+            .block(Block::bordered().title(format!(" {title} ")))
+            .gauge_style(Style::new().fg(color))
+            .ratio(ratio.clamp(0.0, 1.0))
+            .label(label);
+        frame.render_widget(gauge, area);
+    }
 
     draw_agents(frame, app, agents);
     draw_ports(frame, app, ports);
@@ -104,7 +92,6 @@ fn draw_agents(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_ports(frame: &mut Frame, app: &App, area: Rect) {
-    let owners = agent_owners(app);
     let rows: Vec<Row> = app
         .ports
         .iter()
@@ -115,17 +102,13 @@ fn draw_ports(frame: &mut Frame, app: &App, area: Rect) {
                 .map(crate::agents::proc_name)
                 .unwrap_or_default();
             let pid = l.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".into());
-            let owner = l
-                .pid
-                .and_then(|p| owners.get(&p))
-                .cloned()
-                .unwrap_or_default();
-            let row = Row::new([format!(":{}", l.port), pid, name, owner.clone()]);
-            if owner.is_empty() {
-                row
+            let owner = l.pid.and_then(|p| owner(app, p));
+            let style = if owner.is_some() {
+                Style::new().fg(Color::Cyan)
             } else {
-                row.style(Style::new().fg(Color::Cyan))
-            }
+                Style::new()
+            };
+            Row::new([format!(":{}", l.port), pid, name, owner.unwrap_or_default()]).style(style)
         })
         .collect();
     let title = format!(" ports ({}) ", app.ports.len());
@@ -180,18 +163,17 @@ fn draw_orphans(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-/// Which agent each pid belongs to, for tagging ports.
-fn agent_owners(app: &App) -> HashMap<Pid, String> {
-    let mut owners = HashMap::new();
-    for agent in &app.agents {
-        for p in &agent.procs {
-            owners.insert(p.pid, agent.kind.to_string());
-        }
+/// Which agent a pid belongs to, for tagging ports.
+fn owner(app: &App, pid: Pid) -> Option<String> {
+    if let Some(agent) = app
+        .agents
+        .iter()
+        .find(|a| a.procs.iter().any(|p| p.pid == pid))
+    {
+        return Some(agent.kind.to_string());
     }
-    for o in &app.orphans {
-        owners.insert(o.pid, format!("orphan:{}", o.agent));
-    }
-    owners
+    let orphan = app.orphans.iter().find(|o| o.pid == pid)?;
+    Some(format!("orphan:{}", orphan.agent))
 }
 
 fn render_table<const N: usize>(
@@ -213,15 +195,7 @@ fn render_table<const N: usize>(
     frame.render_widget(Table::new(rows, widths).header(header).block(block), area);
 }
 
-fn gauge(title: &str, ratio: f64, label: String, color: Color) -> Gauge<'static> {
-    Gauge::default()
-        .block(Block::bordered().title(format!(" {title} ")))
-        .gauge_style(Style::new().fg(color))
-        .ratio(ratio.clamp(0.0, 1.0))
-        .label(label)
-}
-
-fn ratio(used: u64, total: u64) -> f64 {
+fn ratio((used, total): (u64, u64)) -> f64 {
     if total == 0 {
         0.0
     } else {
@@ -229,7 +203,7 @@ fn ratio(used: u64, total: u64) -> f64 {
     }
 }
 
-fn usage_label(used: u64, total: u64) -> String {
+fn usage_label((used, total): (u64, u64)) -> String {
     const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
     format!("{:.1} / {:.1} GiB", used as f64 / GIB, total as f64 / GIB)
 }

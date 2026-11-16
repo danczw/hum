@@ -69,7 +69,8 @@ fn main() -> io::Result<()> {
 }
 
 fn run(mut terminal: DefaultTerminal, app: &mut App) -> io::Result<()> {
-    let mut last_tick = Instant::now() - TICK;
+    app.refresh();
+    let mut last_tick = Instant::now();
 
     loop {
         if last_tick.elapsed() >= TICK {
