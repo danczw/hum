@@ -44,20 +44,16 @@ impl Agent {
 }
 
 pub fn scan(sys: &System) -> Vec<Agent> {
-    // Skip kernel threads, which are listed as processes.
-    let procs = || {
-        sys.processes()
-            .values()
-            .filter(|p| p.thread_kind().is_none())
-    };
     let mut children: HashMap<Pid, Vec<Pid>> = HashMap::new();
-    for p in procs() {
+    for p in sys.processes().values() {
         if let Some(parent) = p.parent() {
             children.entry(parent).or_default().push(p.pid());
         }
     }
 
-    let mut agents: Vec<Agent> = procs()
+    let mut agents: Vec<Agent> = sys
+        .processes()
+        .values()
         .filter_map(|p| {
             let kind = agent_kind(p)?;
             // Agents started by another agent belong to that agent's tree.
