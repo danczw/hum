@@ -25,7 +25,6 @@ pub struct Pane {
 /// The rows of a section one frame shows.
 #[derive(Debug, PartialEq)]
 pub struct Window {
-    /// The first row shown.
     pub offset: usize,
     /// How many rows are shown, from `offset`.
     pub rows: usize,
@@ -36,8 +35,8 @@ pub struct Window {
 
 impl Pane {
     /// Finds the selected row among `keys` and scrolls so it shows in
-    /// `height` lines. Below the window a `+N more` line takes the last
-    /// line, from two lines up.
+    /// `height` lines. When rows remain below and at least two lines fit, a
+    /// `+N more` line takes the last one.
     pub fn frame(&mut self, keys: Vec<Key>, height: usize) -> Window {
         let len = keys.len();
         if let Some(i) = self.key.and_then(|k| keys.iter().position(|&x| x == k)) {
