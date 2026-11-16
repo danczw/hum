@@ -57,6 +57,7 @@ fn draw_agents(frame: &mut Frame, app: &App, area: Rect) {
             let root = &agent.procs[0];
             let head = Row::new([
                 agent.kind.to_string(),
+                agent.project.clone(),
                 root.pid.to_string(),
                 fmt_cores(agent.cpu()),
                 fmt_bytes(agent.mem()),
@@ -65,6 +66,7 @@ fn draw_agents(frame: &mut Frame, app: &App, area: Rect) {
             let kids = agent.procs[1..].iter().map(|p| {
                 Row::new([
                     format!("{}└ {}", "  ".repeat(p.depth - 1), p.name),
+                    String::new(),
                     p.pid.to_string(),
                     fmt_cores(p.cpu),
                     fmt_bytes(p.mem),
@@ -76,6 +78,7 @@ fn draw_agents(frame: &mut Frame, app: &App, area: Rect) {
     let title = format!(" agents ({}) ", app.agents.len());
     let widths = [
         Constraint::Min(16),
+        Constraint::Min(8),
         Constraint::Length(8),
         Constraint::Length(7),
         Constraint::Length(7),
@@ -84,7 +87,7 @@ fn draw_agents(frame: &mut Frame, app: &App, area: Rect) {
         frame,
         area,
         &title,
-        ["process", "pid", "cores", "mem"],
+        ["process", "project", "pid", "cores", "mem"],
         rows,
         &widths,
         "no agents running",

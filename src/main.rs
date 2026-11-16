@@ -3,6 +3,7 @@ mod ports;
 mod ui;
 
 use std::io;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use ratatui::DefaultTerminal;
@@ -18,6 +19,7 @@ const PORT_TICKS: u32 = 5;
 
 struct App {
     sys: System,
+    home: Option<PathBuf>,
     ticks: u32,
     agents: Vec<Agent>,
     tracker: OrphanTracker,
@@ -29,6 +31,7 @@ impl App {
     fn new() -> io::Result<Self> {
         Ok(Self {
             sys: System::new().map_err(io::Error::other)?,
+            home: std::env::var_os("HOME").map(PathBuf::from),
             ticks: 0,
             agents: Vec::new(),
             tracker: OrphanTracker::default(),
@@ -49,10 +52,11 @@ impl App {
                 // sysinfo keeps a pid's name from before an exec, so re-read
                 // cmd every tick to see what the process runs now.
                 .with_cmd(UpdateKind::Always)
+                .with_cwd(UpdateKind::OnlyIfNotSet)
                 .without_tasks(),
         );
         let procs = agents::snapshot(&self.sys);
-        self.agents = agents::scan(&procs);
+        self.agents = agents::scan(&procs, self.home.as_deref());
         self.orphans = self.tracker.update(&procs, &self.agents);
         if self.ticks.is_multiple_of(PORT_TICKS) {
             self.ports = ports::listening(&self.sys);
