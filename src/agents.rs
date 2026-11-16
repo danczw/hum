@@ -44,7 +44,7 @@ impl Agent {
 }
 
 pub fn scan(sys: &System) -> Vec<Agent> {
-    // Threads are listed as processes on Linux; skip them.
+    // Skip kernel threads, which are listed as processes.
     let procs = || {
         sys.processes()
             .values()
