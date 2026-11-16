@@ -70,6 +70,11 @@ pub struct Agent {
 }
 
 impl Agent {
+    /// The session as `<kind>/<project>`, e.g. `claude/hum`.
+    pub fn label(&self) -> String {
+        format!("{}/{}", self.kind, self.project)
+    }
+
     pub fn cpu(&self) -> f32 {
         self.procs.iter().map(|p| p.cpu).sum()
     }
@@ -205,7 +210,8 @@ pub fn project(cwd: Option<&Path>, home: Option<&Path>) -> String {
 pub struct Orphan {
     pub pid: Pid,
     pub name: String,
-    pub agent: &'static str,
+    /// The session that spawned it, see [`Agent::label`].
+    pub agent: String,
     pub cpu: f32,
     pub mem: u64,
 }
@@ -214,8 +220,9 @@ pub struct Orphan {
 /// Only catches orphans whose agent tree changed while hum was running.
 #[derive(Default)]
 pub struct OrphanTracker {
-    /// pid -> (agent kind, start time); start time guards against pid reuse.
-    seen: HashMap<Pid, (&'static str, u64)>,
+    /// pid -> (agent label, start time); start time guards against pid reuse.
+    /// The label is stored so it survives the agent exiting.
+    seen: HashMap<Pid, (String, u64)>,
 }
 
 impl OrphanTracker {
@@ -225,9 +232,10 @@ impl OrphanTracker {
 
         let mut current = HashSet::new();
         for agent in agents {
+            let label = agent.label();
             for p in &agent.procs[1..] {
                 current.insert(p.pid);
-                self.seen.insert(p.pid, (agent.kind, p.start));
+                self.seen.insert(p.pid, (label.clone(), p.start));
             }
         }
         // A nested agent whose parent agent exited is now a root, not an orphan.
@@ -244,7 +252,7 @@ impl OrphanTracker {
                 Some(Orphan {
                     pid: *pid,
                     name: display_name(&p.name, &p.cmd),
-                    agent,
+                    agent: agent.clone(),
                     cpu: p.cpu,
                     mem: p.mem,
                 })
@@ -375,7 +383,21 @@ mod tests {
         let procs = HashMap::from([proc(11, 1, 101, "vite")]);
         let orphans = tracker.update(&procs, &scan(&procs, home()));
         assert_eq!(pids(&orphans), [11]);
-        assert_eq!(orphans[0].agent, "claude");
+        assert_eq!(orphans[0].agent, "claude/?");
+    }
+
+    #[test]
+    fn orphan_keeps_project_after_agent_exits() {
+        let mut tracker = OrphanTracker::default();
+        let procs = HashMap::from([
+            in_dir(proc(10, 1, 100, "claude"), "/home/u/code/a"),
+            proc(11, 10, 101, "vite"),
+        ]);
+        tracker.update(&procs, &scan(&procs, home()));
+
+        let procs = HashMap::from([proc(11, 1, 101, "vite")]);
+        let orphans = tracker.update(&procs, &scan(&procs, home()));
+        assert_eq!(orphans[0].agent, "claude/a");
     }
 
     #[test]
