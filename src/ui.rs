@@ -154,6 +154,7 @@ fn render(frame: &mut Frame, screen: &Screen, view: &mut View) {
     if view.help {
         draw_help(frame);
     }
+    focus.settle();
 }
 
 /// `cpu ⣿⣿⡆⠀ 34%   mem ⣿⣿⣿⠀ 12.1/31G   swp ⡀⠀⠀⠀ 0.0/8G` on one line. The
