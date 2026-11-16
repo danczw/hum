@@ -34,14 +34,20 @@ pub fn listening(sys: &System) -> Vec<Listener> {
     }
 
     let wanted: HashSet<&str> = sockets.iter().map(|(_, inode)| inode.as_str()).collect();
-    let owners = socket_owners(&wanted);
+    let holders = socket_holders(&wanted);
     let mut listeners: Vec<Listener> = sockets
         .into_iter()
         .map(|(port, inode)| Listener {
             port,
-            pid: owners
-                .get(&inode)
-                .map(|&pid| topmost_holder(sys, pid, &inode)),
+            // Prefork servers (nginx, gunicorn) share one listen socket
+            // between a master and its workers; show the master.
+            pid: holders.get(&inode).and_then(|pids| {
+                pids.iter().copied().find(|&pid| {
+                    sys.process(pid)
+                        .and_then(|p| p.parent())
+                        .is_none_or(|parent| !pids.contains(&parent))
+                })
+            }),
         })
         .collect();
     listeners.sort_by_key(|l| (l.port, l.pid));
@@ -49,21 +55,18 @@ pub fn listening(sys: &System) -> Vec<Listener> {
     listeners
 }
 
-/// Maps the wanted socket inodes to the pid holding them, stopping once all
-/// are found. Sockets held by other users' processes stay unresolved, since
-/// their fd tables are not readable.
-fn socket_owners(wanted: &HashSet<&str>) -> HashMap<String, Pid> {
-    let mut owners = HashMap::new();
+/// Maps the wanted socket inodes to every pid holding them. Sockets held by
+/// other users' processes stay unresolved, since their fd tables are not
+/// readable.
+fn socket_holders(wanted: &HashSet<&str>) -> HashMap<String, Vec<Pid>> {
+    let mut holders: HashMap<String, Vec<Pid>> = HashMap::new();
     if wanted.is_empty() {
-        return owners;
+        return holders;
     }
     let Ok(entries) = fs::read_dir("/proc") else {
-        return owners;
+        return holders;
     };
     for entry in entries.flatten() {
-        if owners.len() == wanted.len() {
-            break;
-        }
         let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse().ok()) else {
             continue;
         };
@@ -79,32 +82,12 @@ fn socket_owners(wanted: &HashSet<&str>) -> HashMap<String, Pid> {
                 .and_then(|t| t.strip_prefix("socket:["))
                 .and_then(|t| t.strip_suffix(']'));
             if let Some(inode) = inode.filter(|i| wanted.contains(i)) {
-                owners
+                holders
                     .entry(inode.to_string())
-                    .or_insert(Pid::from_u32(pid));
+                    .or_default()
+                    .push(Pid::from_u32(pid));
             }
         }
     }
-    owners
-}
-
-/// Prefork servers (nginx, gunicorn) share one listen socket between a master
-/// and its workers. Climb from whichever holder was found to the topmost
-/// ancestor still holding it, so the port always shows the master.
-fn topmost_holder(sys: &System, mut pid: Pid, inode: &str) -> Pid {
-    while let Some(parent) = sys.process(pid).and_then(|p| p.parent())
-        && holds_socket(parent, inode)
-    {
-        pid = parent;
-    }
-    pid
-}
-
-fn holds_socket(pid: Pid, inode: &str) -> bool {
-    let target = format!("socket:[{inode}]");
-    let Ok(fds) = fs::read_dir(format!("/proc/{pid}/fd")) else {
-        return false;
-    };
-    fds.flatten()
-        .any(|fd| fs::read_link(fd.path()).is_ok_and(|t| t.as_os_str() == target.as_str()))
+    holders
 }
