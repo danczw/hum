@@ -21,6 +21,11 @@ const MEM: Constraint = Constraint::Length(7);
 /// right-hand column.
 const WIDE: u16 = 100;
 
+/// From this height up the gauge line gets a blank row above and below. In
+/// shorter panes those rows go to data: at 74x9 they would leave rounded
+/// sections with no agent rows.
+const AIRY: u16 = 12;
+
 const DIM: Style = Style::new().fg(Color::DarkGray);
 
 /// How sections are framed. Both looks stay selectable until one is picked
@@ -34,11 +39,11 @@ pub enum Chrome {
 }
 
 impl Chrome {
-    /// `HUM_STYLE=borderless|rounded`; borderless when unset or unknown.
+    /// `HUM_STYLE=borderless|rounded`; rounded when unset or unknown.
     pub fn from_env() -> Self {
         match std::env::var("HUM_STYLE").as_deref() {
-            Ok("rounded") => Self::Rounded,
-            _ => Self::Borderless,
+            Ok("borderless") => Self::Borderless,
+            _ => Self::Rounded,
         }
     }
 
@@ -125,8 +130,14 @@ fn screen(app: &App) -> Screen<'_> {
 }
 
 fn render(frame: &mut Frame, screen: &Screen, view: &View) {
-    let [gauges, body] =
-        Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(frame.area());
+    let pad = u16::from(frame.area().height >= AIRY);
+    let [_, gauges, _, body] = Layout::vertical([
+        Constraint::Length(pad),
+        Constraint::Length(1),
+        Constraint::Length(pad),
+        Constraint::Fill(1),
+    ])
+    .areas(frame.area());
     draw_gauges(frame, screen, gauges);
 
     let agents = agents_section(screen.agents);
@@ -452,6 +463,10 @@ mod tests {
 
     /// The 74x9 mockup from #6: three agents, one orphan, two ports.
     fn lines(chrome: Chrome) -> Vec<String> {
+        lines_at(chrome, 9)
+    }
+
+    fn lines_at(chrome: Chrome, height: u16) -> Vec<String> {
         let procs: HashMap<Pid, ProcInfo> = [
             root_proc(4123, "claude", "/x/hum", 310 << 20),
             root_proc(5871, "claude", "/x/infra", 280 << 20),
@@ -491,10 +506,10 @@ mod tests {
             chrome,
             help: false,
         };
-        let mut terminal = Terminal::new(TestBackend::new(74, 9)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(74, height)).unwrap();
         terminal.draw(|f| render(f, &screen, &view)).unwrap();
         let buf = terminal.backend().buffer();
-        (0..9)
+        (0..height)
             .map(|y| (0..74).map(|x| buf[(x, y)].symbol()).collect())
             .collect()
     }
@@ -544,5 +559,14 @@ mod tests {
         assert_eq!(braille_bar(1.5, 2), "⣿⣿");
         assert_eq!(braille_bar(-1.0, 2), "⠀⠀");
         assert_eq!(braille_bar(0.5, 0), "");
+    }
+
+    #[test]
+    fn gauges_get_blank_rows_around_them_when_rows_allow() {
+        let lines = lines_at(Chrome::Rounded, 16);
+        assert_eq!(lines[0].trim(), "");
+        assert!(lines[1].starts_with("cpu ⣿"), "{}", lines[1]);
+        assert_eq!(lines[2].trim(), "");
+        assert!(lines[3].starts_with("╭ agents 3 "), "{}", lines[3]);
     }
 }
