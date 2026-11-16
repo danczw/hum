@@ -52,6 +52,9 @@ impl App {
                 // sysinfo keeps a pid's name from before an exec, so re-read
                 // cmd every tick to see what the process runs now.
                 .with_cmd(UpdateKind::Always)
+                // cwd only names the session, so read it once per pid to skip a
+                // readlink per process per tick. A chdir or deletion after the
+                // first read goes unseen.
                 .with_cwd(UpdateKind::OnlyIfNotSet)
                 .without_tasks(),
         );
