@@ -18,7 +18,7 @@ pub struct Theme {
     pub load_low: Style,
     pub load_mid: Style,
     pub load_high: Style,
-    #[cfg_attr(not(test), expect(dead_code, reason = "no row selection yet"))]
+    /// The row under the cursor.
     pub selected: Style,
 }
 
@@ -41,23 +41,33 @@ impl Theme {
     }
 
     /// Truecolor, the older ayu-mirage palette (bg `#212733`, fg `#d9d7ce`).
-    /// Dark backgrounds only.
+    /// Dark backgrounds only. The selected row takes the palette's selection
+    /// bg.
     pub fn ayu_mirage() -> Self {
         Self::colors(
             Color::from_u32(0x5c6773),
             Color::from_u32(0x5ccfe6),
             Color::from_u32(0xffd57f),
             Color::from_u32(0xff3333),
+            Style::new().bg(Color::from_u32(0x343f4c)),
         )
     }
 
     /// ANSI 16 for terminals without truecolor; follows the terminal theme.
+    /// No bg of the 16 reads on both dark and light themes, so the selected
+    /// row is reversed.
     pub fn ansi() -> Self {
-        Self::colors(Color::DarkGray, Color::Cyan, Color::Yellow, Color::Red)
+        Self::colors(
+            Color::DarkGray,
+            Color::Cyan,
+            Color::Yellow,
+            Color::Red,
+            Style::new().add_modifier(Modifier::REVERSED),
+        )
     }
 
     /// `warn` doubles as `load_mid`; `load_low` keeps the default fg.
-    fn colors(dim: Color, accent: Color, warn: Color, high: Color) -> Self {
+    fn colors(dim: Color, accent: Color, warn: Color, high: Color, selected: Style) -> Self {
         Self {
             dim: Style::new().fg(dim),
             accent: Style::new().fg(accent),
@@ -65,7 +75,7 @@ impl Theme {
             load_low: Style::new(),
             load_mid: Style::new().fg(warn),
             load_high: Style::new().fg(high),
-            selected: Style::new().add_modifier(Modifier::REVERSED),
+            selected,
         }
     }
 

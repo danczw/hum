@@ -13,7 +13,7 @@ A small terminal monitor for machines running coding agents. Built with [ratatui
 cargo run --release
 ```
 
-Keys: `q` quits, `?` lists keys.
+Keys: `j`/`k` or arrows move a cursor, `Tab` switches section, `Esc` hides the cursor, `q` quits, `?` lists all keys.
 
 ## License
 
