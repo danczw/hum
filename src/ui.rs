@@ -1,12 +1,13 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Cell, Clear, Padding, Paragraph, Row, Table};
 use sysinfo::Pid;
 
 use crate::App;
 use crate::agents::{self, Agent, Orphan};
+use crate::theme::Theme;
 
 // Numbers get fixed widths and text columns fill what is left, so a narrow
 // pane truncates names, never numbers. Fill ranks below Length in ratatui's
@@ -39,8 +40,6 @@ const WIDE: u16 = AGENTS_MIN + SIDE_MIN;
 /// sections. In shorter panes that row goes to data.
 const AIRY: u16 = 12;
 
-const DIM: Style = Style::new().fg(Color::DarkGray);
-
 /// Rows a section's rounded box takes without data rows: top and bottom
 /// border.
 const BOX: u16 = 2;
@@ -48,6 +47,7 @@ const BOX: u16 = 2;
 /// What the user toggles while hum runs.
 pub struct View {
     pub help: bool,
+    pub theme: Theme,
 }
 
 /// Everything one frame shows, read out of [`App`] so drawing needs no
@@ -75,6 +75,8 @@ struct PortRow {
 struct Section {
     name: &'static str,
     count: usize,
+    /// Draws the count in the title; `None` keeps it dim like the rest.
+    count_style: Option<Style>,
     header: Row<'static>,
     rows: Vec<Row<'static>>,
     widths: Vec<Constraint>,
@@ -111,6 +113,7 @@ fn screen(app: &App) -> Screen<'_> {
 }
 
 fn render(frame: &mut Frame, screen: &Screen, view: &View) {
+    let theme = &view.theme;
     let pad = u16::from(frame.area().height >= AIRY);
     let [gauges, _, body] = Layout::vertical([
         Constraint::Length(1),
@@ -118,19 +121,24 @@ fn render(frame: &mut Frame, screen: &Screen, view: &View) {
         Constraint::Fill(1),
     ])
     .areas(frame.area());
-    draw_gauges(frame, screen, gauges);
+    draw_gauges(frame, screen, gauges, theme);
 
-    let orphans = orphans_section(screen.orphans);
+    let orphans = orphans_section(screen.orphans, theme);
     let ports = ports_section(&screen.ports);
     if body.width >= WIDE {
         let side = (body.width * 2 / 5).max(SIDE_MIN);
         let [left, right] =
             Layout::horizontal([Constraint::Fill(1), Constraint::Length(side)]).areas(body);
-        draw_section(frame, agents_section(screen.agents, left.width), left);
-        stack(frame, [orphans, ports], right);
+        draw_section(
+            frame,
+            agents_section(screen.agents, left.width, theme),
+            left,
+            theme,
+        );
+        stack(frame, [orphans, ports], right, theme);
     } else {
-        let agents = agents_section(screen.agents, body.width);
-        stack(frame, [agents, orphans, ports], body);
+        let agents = agents_section(screen.agents, body.width, theme);
+        stack(frame, [agents, orphans, ports], body, theme);
     }
 
     if view.help {
@@ -140,45 +148,42 @@ fn render(frame: &mut Frame, screen: &Screen, view: &View) {
 
 /// `cpu ⣿⣿⡆⠀ 34%   mem ⣿⣿⣿⠀ 12.1/31G   swp ⡀⠀⠀⠀ 0.0/8G` on one line. The
 /// bars share one length so they compare at a glance, and stretch to fill
-/// the line. The unused part stays blank, no track.
-fn draw_gauges(frame: &mut Frame, screen: &Screen, area: Rect) {
+/// the line. The unused part stays blank, no track. Each bar takes one
+/// color from its load.
+fn draw_gauges(frame: &mut Frame, screen: &Screen, area: Rect, theme: &Theme) {
     let gauges = [
         (
             "cpu",
             screen.cpu,
             // as wide as `100%` so the bars do not jitter
             format!("{:>4}", format!("{:.0}%", screen.cpu * 100.0)),
-            Color::Cyan,
         ),
-        (
-            "mem",
-            ratio(screen.mem),
-            usage_label(screen.mem),
-            Color::Magenta,
-        ),
-        (
-            "swp",
-            ratio(screen.swap),
-            usage_label(screen.swap),
-            Color::Yellow,
-        ),
+        ("mem", ratio(screen.mem), usage_label(screen.mem)),
+        ("swp", ratio(screen.swap), usage_label(screen.swap)),
     ];
     const GAP: u16 = 3;
     // name, space, bar, space, label
-    let text = |(name, _, label, _): &(&str, f64, String, Color)| name.len() + label.len() + 2;
+    let text = |(name, _, label): &(&str, f64, String)| name.len() + label.len() + 2;
     let fixed: usize = gauges.iter().map(text).sum::<usize>() + usize::from(GAP) * 2;
     let bar = usize::from(area.width).saturating_sub(fixed) / gauges.len();
     let widths = gauges
         .each_ref()
         .map(|g| Constraint::Length((text(g) + bar) as u16));
     let areas: [Rect; 3] = Layout::horizontal(widths).spacing(GAP).areas(area);
-    for ((name, ratio, label, color), area) in gauges.into_iter().zip(areas) {
+    for ((name, ratio, label), area) in gauges.into_iter().zip(areas) {
+        let bar = braille_bar(ratio, bar);
+        // a blank cell ends the used part
+        let (used, unused) = bar.split_at(bar.find('⠀').unwrap_or(bar.len()));
+        // every label ends in a one-char unit: `%` or `G`
+        let (value, unit) = label.split_at(label.len() - 1);
         let line = Line::from(vec![
-            Span::styled(name, DIM),
+            Span::styled(name, theme.dim),
             Span::raw(" "),
-            Span::styled(braille_bar(ratio, bar), Style::new().fg(color)),
+            Span::styled(used.to_string(), theme.load(ratio)),
+            Span::styled(unused.to_string(), theme.dim),
             Span::raw(" "),
-            Span::raw(label),
+            Span::raw(value.to_string()),
+            Span::styled(unit.to_string(), theme.dim),
         ]);
         frame.render_widget(line, area);
     }
@@ -186,7 +191,7 @@ fn draw_gauges(frame: &mut Frame, screen: &Screen, area: Rect) {
 
 /// `width` is the whole box. Width beyond both names' minimum goes 3:1 to
 /// process and project, and names longer than their column end in `…`.
-fn agents_section(agents: &[Agent], width: u16) -> Section {
+fn agents_section(agents: &[Agent], width: u16, theme: &Theme) -> Section {
     let names = width.saturating_sub(AGENTS_FIXED);
     // below both minimums project gives way first
     let project =
@@ -204,7 +209,7 @@ fn agents_section(agents: &[Agent], width: u16) -> Section {
                 num(fmt_cores(agent.cpu())),
                 num(fmt_bytes(agent.mem())),
             ])
-            .style(Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+            .style(theme.accent);
             let kids = agent.procs[1..].iter().map(|p| {
                 Row::new([
                     Cell::from(cut(
@@ -224,6 +229,7 @@ fn agents_section(agents: &[Agent], width: u16) -> Section {
     Section {
         name: "agents",
         count: agents.len(),
+        count_style: None,
         header: Row::new([
             Cell::from("process"),
             Cell::from("project"),
@@ -242,23 +248,24 @@ fn agents_section(agents: &[Agent], width: u16) -> Section {
     }
 }
 
-fn orphans_section(orphans: &[Orphan]) -> Section {
+/// Orphan rows warn, except `from`: agent tags keep the default color.
+fn orphans_section(orphans: &[Orphan], theme: &Theme) -> Section {
     let rows = orphans
         .iter()
         .map(|o| {
             Row::new([
-                num(o.pid.to_string()),
-                Cell::from(cut(&o.name, ORPHAN_NAME)),
+                num(o.pid.to_string()).style(theme.warn),
+                Cell::from(cut(&o.name, ORPHAN_NAME)).style(theme.warn),
                 Cell::from(o.from.clone()),
-                num(fmt_cores(o.cpu)),
-                num(fmt_bytes(o.mem)),
+                num(fmt_cores(o.cpu)).style(theme.warn),
+                num(fmt_bytes(o.mem)).style(theme.warn),
             ])
-            .style(Style::new().fg(Color::Yellow))
         })
         .collect();
     Section {
         name: "orphans",
         count: orphans.len(),
+        count_style: (!orphans.is_empty()).then_some(theme.warn),
         header: Row::new([
             num("pid".into()),
             Cell::from("process"),
@@ -282,23 +289,18 @@ fn ports_section(ports: &[PortRow]) -> Section {
     let rows = ports
         .iter()
         .map(|p| {
-            let style = if p.owner.is_some() {
-                Style::new().fg(Color::Cyan)
-            } else {
-                Style::new()
-            };
             Row::new([
                 Cell::from(format!(":{}", p.port)),
                 num(p.pid.map_or_else(|| "-".into(), |p| p.to_string())),
                 Cell::from(p.name.clone()),
                 Cell::from(p.owner.clone().unwrap_or_default()),
             ])
-            .style(style)
         })
         .collect();
     Section {
         name: "ports",
         count: ports.len(),
+        count_style: None,
         header: Row::new([
             Cell::from("port"),
             num("pid".into()),
@@ -319,7 +321,7 @@ fn ports_section(ports: &[PortRow]) -> Section {
 /// go to the earlier sections first, and a header only shows with at least
 /// one row under it. Rows nobody needs are shared out so the boxes fill
 /// the area.
-fn stack<const N: usize>(frame: &mut Frame, sections: [Section; N], area: Rect) {
+fn stack<const N: usize>(frame: &mut Frame, sections: [Section; N], area: Rect, theme: &Theme) {
     let mut left = area.height;
     let mut heights = [0; N];
     for h in &mut heights {
@@ -343,22 +345,26 @@ fn stack<const N: usize>(frame: &mut Frame, sections: [Section; N], area: Rect) 
     }
     let areas: [Rect; N] = Layout::vertical(heights.map(Constraint::Length)).areas(area);
     for (section, area) in sections.into_iter().zip(areas) {
-        draw_section(frame, section, area);
+        draw_section(frame, section, area, theme);
     }
 }
 
 /// A thin rounded dim box with the title and count in its top border.
-fn draw_section(frame: &mut Frame, section: Section, area: Rect) {
+fn draw_section(frame: &mut Frame, section: Section, area: Rect, theme: &Theme) {
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(DIM)
+        .border_style(theme.dim)
         .padding(Padding::horizontal(1))
-        .title(Line::styled(
-            format!(" {} {} ", section.name, section.count),
-            DIM,
-        ));
+        .title(Line::from(vec![
+            Span::styled(format!(" {} ", section.name), theme.dim),
+            Span::styled(
+                section.count.to_string(),
+                section.count_style.unwrap_or(theme.dim),
+            ),
+            Span::styled(" ", theme.dim),
+        ]));
     let table = Table::new(section.rows, section.widths)
-        .header(section.header.style(DIM))
+        .header(section.header.style(theme.dim))
         .block(block);
     frame.render_widget(table, area);
 }
@@ -368,6 +374,7 @@ fn draw_help(frame: &mut Frame) {
         "q        quit",
         "Esc      close help, else quit",
         "?        toggle this help",
+        "p        flip palette (dev)",
     ];
     let width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) + 4;
     let [area] = Layout::horizontal([Constraint::Length(width as u16)])
@@ -486,8 +493,11 @@ mod tests {
 
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::style::Color;
 
     use crate::agents::{self, ProcInfo};
+    use crate::theme::Palette;
 
     const GIB: u64 = 1024 * 1024 * 1024;
 
@@ -530,6 +540,13 @@ mod tests {
     }
 
     fn draw_lines((width, height): (u16, u16), procs: Vec<(Pid, ProcInfo)>) -> Vec<String> {
+        let buf = draw((width, height), procs, Theme::palette(Palette::Ansi));
+        (0..height)
+            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    fn draw((width, height): (u16, u16), procs: Vec<(Pid, ProcInfo)>, theme: Theme) -> Buffer {
         let procs: HashMap<Pid, ProcInfo> = procs.into_iter().collect();
         let agents = agents::scan(&procs, None);
         let orphans = [Orphan {
@@ -560,13 +577,64 @@ mod tests {
                 },
             ],
         };
-        let view = View { help: false };
+        let view = View { help: false, theme };
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|f| render(f, &screen, &view)).unwrap();
-        let buf = terminal.backend().buffer();
-        (0..height)
-            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect())
-            .collect()
+        terminal.backend().buffer().clone()
+    }
+
+    /// The color of the first cell where `text` first shows, `skip` chars in.
+    fn fg_at(buf: &Buffer, text: &str, skip: usize) -> Color {
+        let rows = (0..buf.area.height).map(|y| {
+            (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>()
+        });
+        for (y, row) in rows.enumerate() {
+            if let Some(i) = row.find(text) {
+                let x = row[..i].chars().count() + skip;
+                return buf[(x as u16, y as u16)].fg;
+            }
+        }
+        panic!("{text:?} not drawn");
+    }
+
+    fn fg(style: Style) -> Color {
+        style.fg.unwrap_or(Color::Reset)
+    }
+
+    #[test]
+    fn roles_color_their_rows() {
+        let theme = Theme::palette(Palette::Ansi);
+        let buf = draw((74, 16), mockup(), theme);
+        assert_eq!(fg_at(&buf, "agents 3", 0), fg(theme.dim));
+        assert_eq!(fg_at(&buf, "│ claude", 2), fg(theme.accent));
+        assert_eq!(fg_at(&buf, "orphans 1", 0), fg(theme.dim));
+        assert_eq!(fg_at(&buf, "orphans 1", 8), fg(theme.warn));
+        // the orphan row warns but its agent tag does not
+        assert_eq!(fg_at(&buf, "9120 node", 0), fg(theme.warn));
+        assert_eq!(fg_at(&buf, "node    claude/hum", 8), Color::Reset);
+        // ports carry no role
+        assert_eq!(fg_at(&buf, ":3000", 0), Color::Reset);
+    }
+
+    #[test]
+    fn gauges_take_their_load_color() {
+        let theme = Theme::palette(Palette::Ansi);
+        let buf = draw((74, 9), mockup(), theme);
+        // cpu at 34% is low
+        assert_eq!(fg_at(&buf, "cpu ⣿", 4), fg(theme.load_low));
+        assert_eq!(fg_at(&buf, "cpu", 0), fg(theme.dim));
+        assert_eq!(fg_at(&buf, "%", 0), fg(theme.dim));
+        assert_eq!(fg_at(&buf, "G ", 0), fg(theme.dim));
+    }
+
+    #[test]
+    fn no_color_draws_no_colors() {
+        let buf = draw((74, 16), mockup(), Theme::no_color());
+        for cell in buf.content() {
+            assert_eq!((cell.fg, cell.bg), (Color::Reset, Color::Reset), "{cell:?}");
+        }
     }
 
     #[test]
