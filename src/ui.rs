@@ -306,7 +306,8 @@ fn ports_section(ports: &[PortRow]) -> Section {
 
 /// Stacks sections top to bottom. Every section keeps its title; data rows
 /// go to the earlier sections first, and a header only shows with at least
-/// one row under it.
+/// one row under it. Rows nobody needs are shared out so the boxes fill
+/// the area.
 fn stack<const N: usize>(frame: &mut Frame, sections: [Section; N], area: Rect) {
     let mut left = area.height;
     let mut heights = [0; N];
@@ -323,6 +324,11 @@ fn stack<const N: usize>(frame: &mut Frame, sections: [Section; N], area: Rect) 
             .min(left);
         *h += rows;
         left -= rows;
+    }
+    let share = left / N as u16;
+    for (i, h) in heights.iter_mut().enumerate() {
+        // the remainder goes to the first sections
+        *h += share + u16::from((i as u16) < left % N as u16);
     }
     let areas: [Rect; N] = Layout::vertical(heights.map(Constraint::Length)).areas(area);
     for (section, area) in sections.into_iter().zip(areas) {
@@ -652,5 +658,18 @@ mod tests {
             "{lines:#?}"
         );
         assert!(lines.iter().any(|l| l.contains(" claude-code-plugins ")));
+    }
+
+    #[test]
+    fn side_column_fills_the_height_like_agents() {
+        let lines = draw_lines((93, 20), mockup());
+        let last = lines.last().unwrap();
+        // agents and ports both close on the bottom row
+        assert_eq!(last.matches('╰').count(), 2, "{lines:#?}");
+        // spare rows are shared, so orphans grow too
+        let orphans_end = lines
+            .iter()
+            .position(|l| l.ends_with('╯') && l.matches('╰').count() == 1);
+        assert!(orphans_end.is_some_and(|y| y > 5), "{lines:#?}");
     }
 }
