@@ -211,7 +211,7 @@ pub struct Orphan {
     pub pid: Pid,
     pub name: String,
     /// The session that spawned it, see [`Agent::label`].
-    pub agent: String,
+    pub from: String,
     pub cpu: f32,
     pub mem: u64,
 }
@@ -220,7 +220,8 @@ pub struct Orphan {
 /// Only catches orphans whose agent tree changed while hum was running.
 #[derive(Default)]
 pub struct OrphanTracker {
-    /// pid -> (agent label, start time); start time guards against pid reuse.
+    /// pid -> (spawning session's label, start time); start time guards
+    /// against pid reuse.
     /// The label is stored so it survives the agent exiting.
     seen: HashMap<Pid, (String, u64)>,
 }
@@ -247,12 +248,12 @@ impl OrphanTracker {
             .seen
             .iter()
             .filter(|(pid, _)| !current.contains(pid))
-            .filter_map(|(pid, (agent, _))| {
+            .filter_map(|(pid, (from, _))| {
                 let p = procs.get(pid)?;
                 Some(Orphan {
                     pid: *pid,
                     name: display_name(&p.name, &p.cmd),
-                    agent: agent.clone(),
+                    from: from.clone(),
                     cpu: p.cpu,
                     mem: p.mem,
                 })
@@ -383,7 +384,7 @@ mod tests {
         let procs = HashMap::from([proc(11, 1, 101, "vite")]);
         let orphans = tracker.update(&procs, &scan(&procs, home()));
         assert_eq!(pids(&orphans), [11]);
-        assert_eq!(orphans[0].agent, "claude/?");
+        assert_eq!(orphans[0].from, "claude/?");
     }
 
     #[test]
@@ -397,7 +398,7 @@ mod tests {
 
         let procs = HashMap::from([proc(11, 1, 101, "vite")]);
         let orphans = tracker.update(&procs, &scan(&procs, home()));
-        assert_eq!(orphans[0].agent, "claude/a");
+        assert_eq!(orphans[0].from, "claude/a");
     }
 
     #[test]
