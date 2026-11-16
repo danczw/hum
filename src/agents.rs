@@ -195,7 +195,7 @@ fn basename(arg: &OsStr) -> &OsStr {
 /// Names a session's project after its working directory: `~` for the home
 /// directory, `?` when the cwd is unreadable. A deleted cwd keeps the
 /// kernel's ` (deleted)` suffix, e.g. `old (deleted)`.
-pub fn project(cwd: Option<&Path>, home: Option<&Path>) -> String {
+fn project(cwd: Option<&Path>, home: Option<&Path>) -> String {
     let Some(cwd) = cwd else {
         return "?".into();
     };
@@ -430,30 +430,27 @@ mod tests {
 
     #[test]
     fn project_is_cwd_basename() {
-        let home = Some(Path::new("/home/u"));
-        assert_eq!(project(Some(Path::new("/home/u/code/hum")), home), "hum");
-        assert_eq!(project(Some(Path::new("/")), home), "/");
+        assert_eq!(project(Some(Path::new("/home/u/code/hum")), home()), "hum");
+        assert_eq!(project(Some(Path::new("/")), home()), "/");
     }
 
     #[test]
     fn project_at_home_is_tilde() {
-        let home = Some(Path::new("/home/u"));
-        assert_eq!(project(Some(Path::new("/home/u")), home), "~");
-        assert_eq!(project(Some(Path::new("/home/u/")), home), "~");
+        assert_eq!(project(Some(Path::new("/home/u")), home()), "~");
+        assert_eq!(project(Some(Path::new("/home/u/")), home()), "~");
         assert_eq!(project(Some(Path::new("/home/u")), None), "u");
     }
 
     #[test]
     fn unreadable_cwd_is_question_mark() {
-        assert_eq!(project(None, Some(Path::new("/home/u"))), "?");
+        assert_eq!(project(None, home()), "?");
     }
 
     #[test]
     fn deleted_cwd_keeps_suffix() {
-        let home = Some(Path::new("/home/u"));
         let cwd = Path::new("/home/u/code/old (deleted)");
-        assert_eq!(project(Some(cwd), home), "old (deleted)");
+        assert_eq!(project(Some(cwd), home()), "old (deleted)");
         let cwd = Path::new("/home/u (deleted)");
-        assert_eq!(project(Some(cwd), home), "u (deleted)");
+        assert_eq!(project(Some(cwd), home()), "u (deleted)");
     }
 }
