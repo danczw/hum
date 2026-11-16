@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::Path;
 
 use sysinfo::{Pid, Process, System};
@@ -18,6 +18,36 @@ const AGENTS: &[&str] = &[
 /// Interpreters that may run an agent as a script, e.g. `node /usr/bin/codex`.
 /// Version suffixes are ignored, so `python3.12` counts as `python`.
 const RUNTIMES: &[&str] = &["node", "bun", "deno", "python"];
+
+/// The process fields detection needs, copied out of sysinfo so detection
+/// runs on plain data.
+pub struct ProcInfo {
+    pub pid: Pid,
+    pub parent: Option<Pid>,
+    pub start: u64,
+    pub name: OsString,
+    pub cmd: Vec<OsString>,
+    pub cpu: f32,
+    pub mem: u64,
+}
+
+pub fn snapshot(sys: &System) -> HashMap<Pid, ProcInfo> {
+    sys.processes()
+        .values()
+        .map(|p| {
+            let info = ProcInfo {
+                pid: p.pid(),
+                parent: p.parent(),
+                start: p.start_time(),
+                name: p.name().to_owned(),
+                cmd: p.cmd().to_vec(),
+                cpu: p.cpu_usage(),
+                mem: p.memory(),
+            };
+            (info.pid, info)
+        })
+        .collect()
+}
 
 pub struct Proc {
     pub pid: Pid,
@@ -44,34 +74,32 @@ impl Agent {
     }
 }
 
-pub fn scan(sys: &System) -> Vec<Agent> {
+pub fn scan(procs: &HashMap<Pid, ProcInfo>) -> Vec<Agent> {
     let mut children: HashMap<Pid, Vec<Pid>> = HashMap::new();
-    for p in sys.processes().values() {
-        if let Some(parent) = p.parent() {
-            children.entry(parent).or_default().push(p.pid());
+    for p in procs.values() {
+        if let Some(parent) = p.parent {
+            children.entry(parent).or_default().push(p.pid);
         }
     }
     for kids in children.values_mut() {
         kids.sort_unstable();
     }
 
-    let kinds: HashMap<Pid, &'static str> = sys
-        .processes()
+    let kinds: HashMap<Pid, &'static str> = procs
         .values()
-        .filter_map(|p| Some((p.pid(), agent_kind(p)?)))
+        .filter_map(|p| Some((p.pid, agent_kind(&p.name, &p.cmd)?)))
         .collect();
     let mut agents: Vec<Agent> = kinds
         .iter()
         // Agents started by another agent belong to that agent's tree.
         .filter(|&(&pid, _)| {
-            let parent = sys.process(pid).and_then(Process::parent);
-            !std::iter::successors(parent, |&p| sys.process(p)?.parent())
-                .any(|p| kinds.contains_key(&p))
+            let parent = procs.get(&pid).and_then(|p| p.parent);
+            !std::iter::successors(parent, |p| procs.get(p)?.parent).any(|p| kinds.contains_key(&p))
         })
         .map(|(&pid, &kind)| {
-            let mut procs = Vec::new();
-            walk(sys, &children, pid, 0, &mut procs);
-            Agent { kind, procs }
+            let mut tree = Vec::new();
+            walk(procs, &children, pid, 0, &mut tree);
+            Agent { kind, procs: tree }
         })
         .collect();
     agents.sort_by_key(|a| a.procs[0].pid);
@@ -79,35 +107,31 @@ pub fn scan(sys: &System) -> Vec<Agent> {
 }
 
 fn walk(
-    sys: &System,
+    procs: &HashMap<Pid, ProcInfo>,
     children: &HashMap<Pid, Vec<Pid>>,
     pid: Pid,
     depth: usize,
     out: &mut Vec<Proc>,
 ) {
-    let Some(p) = sys.process(pid) else { return };
+    let Some(p) = procs.get(&pid) else { return };
     out.push(Proc {
         pid,
-        name: proc_name(p),
-        cpu: p.cpu_usage(),
-        mem: p.memory(),
+        name: display_name(&p.name, &p.cmd),
+        cpu: p.cpu,
+        mem: p.mem,
         depth,
-        start: p.start_time(),
+        start: p.start,
     });
     if let Some(kids) = children.get(&pid) {
         for &kid in kids {
-            walk(sys, children, kid, depth + 1, out);
+            walk(procs, children, kid, depth + 1, out);
         }
     }
 }
 
-fn agent_kind(p: &Process) -> Option<&'static str> {
-    let cmd = p.cmd();
+fn agent_kind(name: &OsStr, cmd: &[OsString]) -> Option<&'static str> {
     let program = cmd.first().map(|a| basename(a));
-    if let Some(kind) = program
-        .and_then(match_agent)
-        .or_else(|| match_agent(p.name()))
-    {
+    if let Some(kind) = program.and_then(match_agent).or_else(|| match_agent(name)) {
         return Some(kind);
     }
     let program = program?.to_string_lossy();
@@ -140,9 +164,12 @@ fn match_agent(name: &OsStr) -> Option<&'static str> {
 /// sysinfo keeps a pid's name from before an exec, but cmd is re-read every
 /// tick, so name the process after what it runs now.
 pub fn proc_name(p: &Process) -> String {
-    p.cmd()
-        .first()
-        .map_or(p.name(), |a| basename(a))
+    display_name(p.name(), p.cmd())
+}
+
+fn display_name(name: &OsStr, cmd: &[OsString]) -> String {
+    cmd.first()
+        .map_or(name, |a| basename(a))
         .to_string_lossy()
         .into_owned()
 }
@@ -168,9 +195,9 @@ pub struct OrphanTracker {
 }
 
 impl OrphanTracker {
-    pub fn update(&mut self, sys: &System, agents: &[Agent]) -> Vec<Orphan> {
+    pub fn update(&mut self, procs: &HashMap<Pid, ProcInfo>, agents: &[Agent]) -> Vec<Orphan> {
         self.seen
-            .retain(|pid, (_, start)| sys.process(*pid).is_some_and(|p| p.start_time() == *start));
+            .retain(|pid, (_, start)| procs.get(pid).is_some_and(|p| p.start == *start));
 
         let mut current = HashSet::new();
         for agent in agents {
@@ -189,13 +216,13 @@ impl OrphanTracker {
             .iter()
             .filter(|(pid, _)| !current.contains(pid))
             .filter_map(|(pid, (agent, _))| {
-                let p = sys.process(*pid)?;
+                let p = procs.get(pid)?;
                 Some(Orphan {
                     pid: *pid,
-                    name: proc_name(p),
+                    name: display_name(&p.name, &p.cmd),
                     agent,
-                    cpu: p.cpu_usage(),
-                    mem: p.memory(),
+                    cpu: p.cpu,
+                    mem: p.mem,
                 })
             })
             .collect();

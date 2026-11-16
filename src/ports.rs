@@ -1,10 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use sysinfo::{Pid, System};
 
 /// Socket state code for LISTEN in /proc/net/tcp.
-const TCP_LISTEN: &str = "0A";
+const TCP_LISTEN: u8 = 0x0A;
 
 pub struct Listener {
     pub port: u16,
@@ -18,22 +19,16 @@ pub fn listening(sys: &System) -> Vec<Listener> {
         let Ok(text) = fs::read_to_string(table) else {
             continue;
         };
-        for line in text.lines().skip(1) {
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            if fields.len() < 10 || fields[3] != TCP_LISTEN {
-                continue;
-            }
-            let port = fields[1]
-                .rsplit(':')
-                .next()
-                .and_then(|p| u16::from_str_radix(p, 16).ok());
-            if let Some(port) = port {
-                sockets.push((port, fields[9].to_string()));
-            }
-        }
+        sockets.extend(
+            text.lines()
+                .skip(1)
+                .filter_map(parse_line)
+                .filter(|s| s.state == TCP_LISTEN)
+                .map(|s| (s.port, s.inode)),
+        );
     }
 
-    let wanted: HashSet<&str> = sockets.iter().map(|(_, inode)| inode.as_str()).collect();
+    let wanted: HashSet<u64> = sockets.iter().map(|&(_, inode)| inode).collect();
     let holders = socket_holders(&wanted);
     let mut listeners: Vec<Listener> = sockets
         .into_iter()
@@ -55,11 +50,57 @@ pub fn listening(sys: &System) -> Vec<Listener> {
     listeners
 }
 
+/// One row of /proc/net/tcp or /proc/net/tcp6.
+#[derive(Debug, PartialEq)]
+struct TcpSocket {
+    #[allow(dead_code)] // read by bind scope, #12
+    addr: IpAddr,
+    port: u16,
+    state: u8,
+    inode: u64,
+}
+
+/// Parses a socket row, e.g. `0: 0100007F:1F40 00000000:0000 0A ... 4296 ...`.
+/// Returns None for the header and malformed rows.
+fn parse_line(line: &str) -> Option<TcpSocket> {
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    if fields.len() < 10 {
+        return None;
+    }
+    let (addr, port) = fields[1].split_once(':')?;
+    Some(TcpSocket {
+        addr: parse_addr(addr)?,
+        port: u16::from_str_radix(port, 16).ok()?,
+        state: u8::from_str_radix(fields[3], 16).ok()?,
+        inode: fields[9].parse().ok()?,
+    })
+}
+
+/// The kernel prints addresses as 32-bit words in host byte order, so
+/// 127.0.0.1 reads `0100007F` on little-endian machines.
+fn parse_addr(hex: &str) -> Option<IpAddr> {
+    let word = |i: usize| -> Option<[u8; 4]> {
+        let w = u32::from_str_radix(hex.get(i * 8..i * 8 + 8)?, 16).ok()?;
+        Some(w.to_ne_bytes())
+    };
+    match hex.len() {
+        8 => Some(Ipv4Addr::from(word(0)?).into()),
+        32 => {
+            let mut bytes = [0; 16];
+            for i in 0..4 {
+                bytes[i * 4..i * 4 + 4].copy_from_slice(&word(i)?);
+            }
+            Some(Ipv6Addr::from(bytes).into())
+        }
+        _ => None,
+    }
+}
+
 /// Maps the wanted socket inodes to every pid holding them. Sockets held by
 /// other users' processes stay unresolved, since their fd tables are not
 /// readable.
-fn socket_holders(wanted: &HashSet<&str>) -> HashMap<String, Vec<Pid>> {
-    let mut holders: HashMap<String, Vec<Pid>> = HashMap::new();
+fn socket_holders(wanted: &HashSet<u64>) -> HashMap<u64, Vec<Pid>> {
+    let mut holders: HashMap<u64, Vec<Pid>> = HashMap::new();
     if wanted.is_empty() {
         return holders;
     }
@@ -80,12 +121,10 @@ fn socket_holders(wanted: &HashSet<&str>) -> HashMap<String, Vec<Pid>> {
             let inode = target
                 .to_str()
                 .and_then(|t| t.strip_prefix("socket:["))
-                .and_then(|t| t.strip_suffix(']'));
+                .and_then(|t| t.strip_suffix(']'))
+                .and_then(|t| t.parse().ok());
             if let Some(inode) = inode.filter(|i| wanted.contains(i)) {
-                holders
-                    .entry(inode.to_string())
-                    .or_default()
-                    .push(Pid::from_u32(pid));
+                holders.entry(inode).or_default().push(Pid::from_u32(pid));
             }
         }
     }
