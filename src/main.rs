@@ -49,7 +49,7 @@ impl App {
         );
         self.agents = agents::scan(&self.sys);
         self.orphans = self.tracker.update(&self.sys, &self.agents);
-        self.ports = ports::listening();
+        self.ports = ports::listening(&self.sys);
     }
 }
 

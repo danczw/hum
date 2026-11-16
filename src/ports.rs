@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 
-use sysinfo::Pid;
+use sysinfo::{Pid, System};
 
 /// Socket state code for LISTEN in /proc/net/tcp.
 const TCP_LISTEN: &str = "0A";
@@ -12,7 +12,7 @@ pub struct Listener {
 }
 
 /// Listening TCP ports (IPv4 and IPv6) read from /proc. Linux only.
-pub fn listening() -> Vec<Listener> {
+pub fn listening(sys: &System) -> Vec<Listener> {
     let mut sockets = Vec::new();
     for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
         let Ok(text) = fs::read_to_string(table) else {
@@ -39,7 +39,9 @@ pub fn listening() -> Vec<Listener> {
         .into_iter()
         .map(|(port, inode)| Listener {
             port,
-            pid: owners.get(&inode).copied(),
+            pid: owners
+                .get(&inode)
+                .map(|&pid| topmost_holder(sys, pid, &inode)),
         })
         .collect();
     listeners.sort_by_key(|l| (l.port, l.pid));
@@ -77,9 +79,32 @@ fn socket_owners(wanted: &HashSet<&str>) -> HashMap<String, Pid> {
                 .and_then(|t| t.strip_prefix("socket:["))
                 .and_then(|t| t.strip_suffix(']'));
             if let Some(inode) = inode.filter(|i| wanted.contains(i)) {
-                owners.insert(inode.to_string(), Pid::from_u32(pid));
+                owners
+                    .entry(inode.to_string())
+                    .or_insert(Pid::from_u32(pid));
             }
         }
     }
     owners
+}
+
+/// Prefork servers (nginx, gunicorn) share one listen socket between a master
+/// and its workers. Climb from whichever holder was found to the topmost
+/// ancestor still holding it, so the port always shows the master.
+fn topmost_holder(sys: &System, mut pid: Pid, inode: &str) -> Pid {
+    while let Some(parent) = sys.process(pid).and_then(|p| p.parent())
+        && holds_socket(parent, inode)
+    {
+        pid = parent;
+    }
+    pid
+}
+
+fn holds_socket(pid: Pid, inode: &str) -> bool {
+    let target = format!("socket:[{inode}]");
+    let Ok(fds) = fs::read_dir(format!("/proc/{pid}/fd")) else {
+        return false;
+    };
+    fds.flatten()
+        .any(|fd| fs::read_link(fd.path()).is_ok_and(|t| t.as_os_str() == target.as_str()))
 }
