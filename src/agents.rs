@@ -16,7 +16,8 @@ const AGENTS: &[&str] = &[
 ];
 
 /// Interpreters that may run an agent as a script, e.g. `node /usr/bin/codex`.
-const RUNTIMES: &[&str] = &["node", "bun", "deno", "python", "python3"];
+/// Version suffixes are ignored, so `python3.12` counts as `python`.
+const RUNTIMES: &[&str] = &["node", "bun", "deno", "python"];
 
 pub struct Proc {
     pub pid: Pid,
@@ -119,10 +120,18 @@ fn agent_kind(p: &Process) -> Option<&'static str> {
     {
         return Some(kind);
     }
-    if RUNTIMES.contains(&program?.to_string_lossy().as_ref()) {
-        return cmd.get(1).and_then(|a| match_agent(basename(a)));
+    let program = program?.to_string_lossy();
+    let runtime = program.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    if !RUNTIMES.contains(&runtime) {
+        return None;
     }
-    None
+    // Flags may take values (`python -X dev`), so check every non-flag
+    // argument rather than the first, e.g. `node --no-warnings
+    // /usr/bin/gemini` or `python -m aider`.
+    cmd[1..]
+        .iter()
+        .filter(|a| !a.to_string_lossy().starts_with('-'))
+        .find_map(|a| match_agent(basename(a)))
 }
 
 fn match_agent(name: &OsStr) -> Option<&'static str> {
