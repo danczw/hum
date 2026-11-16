@@ -374,7 +374,6 @@ fn draw_help(frame: &mut Frame) {
         "q        quit",
         "Esc      close help, else quit",
         "?        toggle this help",
-        "p        flip palette (dev)",
     ];
     let width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) + 4;
     let [area] = Layout::horizontal([Constraint::Length(width as u16)])
@@ -497,7 +496,6 @@ mod tests {
     use ratatui::style::Color;
 
     use crate::agents::{self, ProcInfo};
-    use crate::theme::Palette;
 
     const GIB: u64 = 1024 * 1024 * 1024;
 
@@ -540,7 +538,7 @@ mod tests {
     }
 
     fn draw_lines((width, height): (u16, u16), procs: Vec<(Pid, ProcInfo)>) -> Vec<String> {
-        let buf = draw((width, height), procs, Theme::palette(Palette::Ansi));
+        let buf = draw((width, height), procs, Theme::ayu_mirage());
         (0..height)
             .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect())
             .collect()
@@ -600,12 +598,12 @@ mod tests {
     }
 
     fn fg(style: Style) -> Color {
-        style.fg.unwrap_or(Color::Reset)
+        style.fg.unwrap_or_default()
     }
 
     #[test]
     fn roles_color_their_rows() {
-        let theme = Theme::palette(Palette::Ansi);
+        let theme = Theme::ayu_mirage();
         let buf = draw((74, 16), mockup(), theme);
         assert_eq!(fg_at(&buf, "agents 3", 0), fg(theme.dim));
         assert_eq!(fg_at(&buf, "│ claude", 2), fg(theme.accent));
@@ -613,14 +611,14 @@ mod tests {
         assert_eq!(fg_at(&buf, "orphans 1", 8), fg(theme.warn));
         // the orphan row warns but its agent tag does not
         assert_eq!(fg_at(&buf, "9120 node", 0), fg(theme.warn));
-        assert_eq!(fg_at(&buf, "node    claude/hum", 8), Color::Reset);
+        assert_eq!(fg_at(&buf, "node    claude/hum", 8), Default::default());
         // ports carry no role
-        assert_eq!(fg_at(&buf, ":3000", 0), Color::Reset);
+        assert_eq!(fg_at(&buf, ":3000", 0), Default::default());
     }
 
     #[test]
     fn gauges_take_their_load_color() {
-        let theme = Theme::palette(Palette::Ansi);
+        let theme = Theme::ayu_mirage();
         let buf = draw((74, 9), mockup(), theme);
         // cpu at 34% is low
         assert_eq!(fg_at(&buf, "cpu ⣿", 4), fg(theme.load_low));
@@ -633,7 +631,7 @@ mod tests {
     fn no_color_draws_no_colors() {
         let buf = draw((74, 16), mockup(), Theme::no_color());
         for cell in buf.content() {
-            assert_eq!((cell.fg, cell.bg), (Color::Reset, Color::Reset), "{cell:?}");
+            assert_eq!((cell.fg, cell.bg), Default::default(), "{cell:?}");
         }
     }
 

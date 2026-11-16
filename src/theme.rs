@@ -7,7 +7,7 @@ pub const LOAD_HIGH: f64 = 0.85;
 
 /// The styles widgets draw with, one per role. Widget code names roles,
 /// never colors.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy)]
 pub struct Theme {
     /// Titles, rules, units, the unused part of bars.
     pub dim: Style,
@@ -18,51 +18,33 @@ pub struct Theme {
     pub load_low: Style,
     pub load_mid: Style,
     pub load_high: Style,
+    #[cfg_attr(not(test), expect(dead_code, reason = "no row selection yet"))]
     pub selected: Style,
-    palette: Option<Palette>,
-}
-
-/// Temporary dev toggle to compare palettes on real data; one ships.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Palette {
-    /// ANSI 16, follows the terminal theme.
-    Ansi,
-    /// Truecolor, the older ayu-mirage palette. Dark backgrounds only.
-    Rgb,
 }
 
 impl Theme {
     /// Modifiers only when `NO_COLOR` is set and non-empty (no-color.org),
-    /// else the palette `HUM_PALETTE` names, ansi by default.
+    /// else [`Theme::ayu_mirage`].
     pub fn from_env() -> Self {
         if std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()) {
-            return Self::no_color();
-        }
-        match std::env::var("HUM_PALETTE").as_deref() {
-            Ok("rgb") => Self::palette(Palette::Rgb),
-            _ => Self::palette(Palette::Ansi),
+            Self::no_color()
+        } else {
+            Self::ayu_mirage()
         }
     }
 
-    pub fn palette(palette: Palette) -> Self {
-        let [dim, accent, warn, high] = match palette {
-            Palette::Ansi => [Color::DarkGray, Color::Cyan, Color::Yellow, Color::Red],
-            Palette::Rgb => [
-                Color::from_u32(0x5c6773),
-                Color::from_u32(0x5ccfe6),
-                Color::from_u32(0xffd57f),
-                Color::from_u32(0xff3333),
-            ],
-        };
+    /// Truecolor, the older ayu-mirage palette (bg `#212733`, fg `#d9d7ce`).
+    /// Dark backgrounds only.
+    pub fn ayu_mirage() -> Self {
+        let warn = Color::from_u32(0xffd57f);
         Self {
-            dim: Style::new().fg(dim),
-            accent: Style::new().fg(accent),
+            dim: Style::new().fg(Color::from_u32(0x5c6773)),
+            accent: Style::new().fg(Color::from_u32(0x5ccfe6)),
             warn: Style::new().fg(warn),
             load_low: Style::new(),
             load_mid: Style::new().fg(warn),
-            load_high: Style::new().fg(high),
+            load_high: Style::new().fg(Color::from_u32(0xff3333)),
             selected: Style::new().add_modifier(Modifier::REVERSED),
-            palette: Some(palette),
         }
     }
 
@@ -76,16 +58,6 @@ impl Theme {
             load_mid: Style::new(),
             load_high: bold,
             selected: Style::new().add_modifier(Modifier::REVERSED),
-            palette: None,
-        }
-    }
-
-    /// The other palette. `NO_COLOR` stays without colors.
-    pub fn flip(self) -> Self {
-        match self.palette {
-            Some(Palette::Ansi) => Self::palette(Palette::Rgb),
-            Some(Palette::Rgb) => Self::palette(Palette::Ansi),
-            None => self,
         }
     }
 
@@ -107,7 +79,7 @@ mod tests {
 
     #[test]
     fn load_steps_at_the_thresholds() {
-        let theme = Theme::palette(Palette::Ansi);
+        let theme = Theme::ayu_mirage();
         assert_eq!(theme.load(0.0), theme.load_low);
         assert_eq!(theme.load(0.59), theme.load_low);
         assert_eq!(theme.load(0.60), theme.load_mid);
@@ -131,13 +103,5 @@ mod tests {
             assert_eq!((style.fg, style.bg), (None, None), "{style:?}");
         }
         assert!(theme.selected.add_modifier.contains(Modifier::REVERSED));
-    }
-
-    #[test]
-    fn flip_swaps_palettes_but_not_no_color() {
-        let ansi = Theme::palette(Palette::Ansi);
-        assert_eq!(ansi.flip(), Theme::palette(Palette::Rgb));
-        assert_eq!(ansi.flip().flip(), ansi);
-        assert_eq!(Theme::no_color().flip(), Theme::no_color());
     }
 }
