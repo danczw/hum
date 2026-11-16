@@ -144,6 +144,7 @@ mod tests {
     const ANY6: &str = "   1: 00000000000000000000000000000000:0016 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 7003 1 0000000000000000 100 0 0 10 0";
 
     #[test]
+    #[cfg(target_endian = "little")]
     fn ipv4_rows() {
         assert_eq!(
             parse_line(LOOPBACK),
@@ -160,6 +161,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_endian = "little")]
     fn ipv6_rows() {
         let lo = parse_line(LOOPBACK6).unwrap();
         assert_eq!(
