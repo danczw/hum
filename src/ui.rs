@@ -20,11 +20,12 @@ use crate::trees::{self, Trees};
 /// pid_max is at most 4194304 on 64-bit Linux: 7 digits.
 const PID: Constraint = Constraint::Length(7);
 /// `fmt_cores` up to 99.99 cores.
-const CORES: Constraint = Constraint::Length(5);
+const CORES_WIDTH: u16 = 5;
+const CORES: Constraint = Constraint::Length(CORES_WIDTH);
 /// Agents and orphans show cores as the 4th of 5 columns. Panes too narrow
-/// for their name columns drop it, and with it 5 chars and a gap.
+/// for their name columns drop it and its gap.
 const CORES_COL: usize = 3;
-const CORES_SPAN: u16 = 5 + 1;
+const CORES_SPAN: u16 = CORES_WIDTH + 1;
 /// `fmt_bytes` up to `1023.9M`.
 const MEM: Constraint = Constraint::Length(7);
 /// Agent process names, tree indent included, get at least this many chars.
