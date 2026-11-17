@@ -945,7 +945,7 @@ fn cut_tagged(text: &str, session: Option<&str>, max: usize) -> String {
     let Some(session) = session else {
         return cut(text, max);
     };
-    let tag = format!("·{session}");
+    let tag = agents::tagged("", Some(session));
     let room = max.saturating_sub(tag.chars().count());
     if room == 0 {
         return cut(&tag, max);
