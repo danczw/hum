@@ -68,11 +68,12 @@ fn interval(s: &str) -> Result<Duration, String> {
 }
 
 /// A name is matched against a process or script basename, so it can hold
-/// no '/'.
+/// no '/'. A leading '-' is a flag that lost its value, as in
+/// `--agent --help`.
 fn agent(name: String) -> Result<String, String> {
-    if name.is_empty() || name.contains('/') {
+    if name.is_empty() || name.contains('/') || name.starts_with('-') {
         return Err(format!(
-            "--agent takes a program name without '/', got '{name}'"
+            "--agent takes a program name, without '/' or a leading '-', got '{name}'"
         ));
     }
     Ok(name)
@@ -144,6 +145,13 @@ mod tests {
         assert!(parse([bad]).is_err());
         let bad = OsString::from_vec(vec![0xff]);
         assert!(parse([OsString::from("--agent"), bad]).is_err());
+    }
+
+    #[test]
+    fn value_does_not_swallow_the_next_flag() {
+        assert!(run(&["--agent", "--help"]).is_err());
+        assert!(run(&["--agent", "-V"]).is_err());
+        assert!(run(&["--interval", "--help"]).is_err());
     }
 
     #[test]
