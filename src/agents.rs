@@ -189,9 +189,7 @@ fn agent_kind_in(name: &OsStr, cmd: &[OsString], extra: &[&'static str]) -> Opti
     if let Some(kind) = program.and_then(match_agent).or_else(|| match_agent(name)) {
         return Some(kind);
     }
-    let program = program?.to_string_lossy();
-    let runtime = program.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
-    if !RUNTIMES.contains(&runtime) {
+    if !is_runtime(&program?.to_string_lossy()) {
         return None;
     }
     // Only the script or `-m` module names the agent; later arguments are
@@ -210,6 +208,12 @@ fn agent_kind_in(name: &OsStr, cmd: &[OsString], extra: &[&'static str]) -> Opti
         }
     }
     None
+}
+
+/// True for an interpreter in [`RUNTIMES`], with or without a version
+/// suffix.
+pub fn is_runtime(program: &str) -> bool {
+    RUNTIMES.contains(&program.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.'))
 }
 
 fn match_agent(name: &OsStr, extra: &[&'static str]) -> Option<&'static str> {
