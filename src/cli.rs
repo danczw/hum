@@ -52,8 +52,8 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Action, String> {
     Ok(Action::Run(opts))
 }
 
-/// sysinfo needs 0.2 seconds between cpu reads; the top end keeps the
-/// float well inside what a Duration holds.
+/// sysinfo needs 0.2 seconds between cpu reads; past an hour a tick is
+/// too slow to watch anything.
 fn interval(s: &str) -> Result<Duration, String> {
     s.parse::<f64>()
         .ok()
