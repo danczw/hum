@@ -264,7 +264,8 @@ fn agents_section(agents: &[Agent], trees: &Trees, width: u16, theme: &Theme) ->
     for agent in agents {
         let root = &agent.procs[0];
         let kids = &agent.procs[1..];
-        let open = trees.is_open(trees::root(agent));
+        let root_key = trees::root(agent);
+        let open = trees.is_open(root_key);
         // `▸ claude (14)` collapsed, `▾ claude` open; a long kind is cut
         // before the count
         let (marker, count) = match kids.len() {
@@ -283,7 +284,7 @@ fn agents_section(agents: &[Agent], trees: &Trees, width: u16, theme: &Theme) ->
             ])
             .style(theme.accent),
         );
-        keys.push(key(root.pid, root.start));
+        keys.push(root_key);
         if !open {
             continue;
         }
