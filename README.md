@@ -13,6 +13,18 @@ A small terminal monitor for machines running coding agents. Built with [ratatui
 cargo run --release
 ```
 
+## Usage
+
+```sh
+hum [--interval <secs>] [--agent <name>]...
+```
+
+- `--interval <secs>`: tick length in seconds, default 1, fractions allowed (`0.5`). Ports refresh every 5 ticks.
+- `--agent <name>`: also treat processes named `<name>` as agents, including scripts run by node, bun, deno or python. Repeatable.
+- `-h`, `--help`: print usage. `-V`, `--version`: print the version.
+
+Invalid input prints a one-line error and exits with code 2.
+
 Keys: `j`/`k` or arrows move a cursor, `Tab` switches section, `Enter` expands or collapses an agent tree, `e`/`c` expand or collapse all, `1` shows a bar per CPU core, `a` shows all ports, `Esc` hides the cursor, `q` quits, `?` lists all keys.
 
 ## License

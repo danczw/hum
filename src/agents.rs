@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use sysinfo::{Pid, Process, System};
@@ -18,6 +19,14 @@ const AGENTS: &[&str] = &[
     "opencode",
     "copilot",
 ];
+
+/// Names added with `--agent`, matched after [`AGENTS`].
+static EXTRA: OnceLock<Vec<&'static str>> = OnceLock::new();
+
+/// Adds agent names to match; only the first call counts.
+pub fn set_extra(names: Vec<&'static str>) {
+    let _ = EXTRA.set(names);
+}
 
 /// Interpreters that may run an agent as a script, e.g. `node /usr/bin/codex`.
 /// Version suffixes are ignored, so `python3.12` counts as `python`.
@@ -171,6 +180,11 @@ fn walk(
 }
 
 fn agent_kind(name: &OsStr, cmd: &[OsString]) -> Option<&'static str> {
+    agent_kind_in(name, cmd, EXTRA.get().map_or(&[], Vec::as_slice))
+}
+
+fn agent_kind_in(name: &OsStr, cmd: &[OsString], extra: &[&'static str]) -> Option<&'static str> {
+    let match_agent = |name: &OsStr| match_agent(name, extra);
     let program = cmd.first().map(|a| basename(a));
     if let Some(kind) = program.and_then(match_agent).or_else(|| match_agent(name)) {
         return Some(kind);
@@ -198,8 +212,12 @@ fn agent_kind(name: &OsStr, cmd: &[OsString]) -> Option<&'static str> {
     None
 }
 
-fn match_agent(name: &OsStr) -> Option<&'static str> {
-    AGENTS.iter().copied().find(|a| OsStr::new(a) == name)
+fn match_agent(name: &OsStr, extra: &[&'static str]) -> Option<&'static str> {
+    AGENTS
+        .iter()
+        .chain(extra)
+        .copied()
+        .find(|a| OsStr::new(a) == name)
 }
 
 /// sysinfo keeps a pid's name from before an exec, but cmd is re-read every
@@ -490,6 +508,17 @@ mod tests {
         assert_eq!(kind("node /usr/bin/codex"), Some("codex"));
         assert_eq!(kind("bun run opencode"), Some("opencode"));
         assert_eq!(kind("python script.py"), None);
+    }
+
+    #[test]
+    fn extra_agent_as_binary_and_script() {
+        let extra_kind = |cmd: &str| {
+            let cmd: Vec<OsString> = cmd.split(' ').map(OsString::from).collect();
+            agent_kind_in(OsStr::new(""), &cmd, &["goose"])
+        };
+        assert_eq!(extra_kind("goose"), Some("goose"));
+        assert_eq!(extra_kind("node /x/goose"), Some("goose"));
+        assert_eq!(kind("goose"), None);
     }
 
     #[test]
