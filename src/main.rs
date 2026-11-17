@@ -89,6 +89,7 @@ fn main() -> io::Result<()> {
     let mut app = App::new()?;
     let mut view = View {
         help: false,
+        help_scroll: 0,
         cores: false,
         all_ports: false,
         theme: Theme::from_env(),
@@ -124,7 +125,14 @@ fn run(mut terminal: DefaultTerminal, app: &mut App, view: &mut View) -> io::Res
                 KeyCode::Esc if view.help => view.help = false,
                 KeyCode::Esc if focus.clear() => {}
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                KeyCode::Char('?') => view.help = !view.help,
+                KeyCode::Char('?') => {
+                    view.help = !view.help;
+                    view.help_scroll = 0;
+                }
+                KeyCode::Char('j') | KeyCode::Down if view.help => view.help_scroll += 1,
+                KeyCode::Char('k') | KeyCode::Up if view.help => {
+                    view.help_scroll = view.help_scroll.saturating_sub(1)
+                }
                 // the cursor stays put behind the help
                 _ if view.help => {}
                 KeyCode::Char('j') | KeyCode::Down => focus.step(1),

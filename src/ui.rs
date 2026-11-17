@@ -77,6 +77,8 @@ const DIVIDER: border::Set = border::Set {
 /// What the user toggles while hum runs.
 pub struct View {
     pub help: bool,
+    /// Rows the help is scrolled down, clamped when drawn.
+    pub help_scroll: usize,
     /// Per-core bars under the gauge line.
     pub cores: bool,
     /// Every listening port, not only those of agents and orphans.
@@ -269,7 +271,7 @@ fn render(frame: &mut Frame, screen: &Screen, view: &mut View) {
     }
 
     if view.help {
-        draw_help(frame);
+        draw_help(frame, &mut view.help_scroll);
     }
     focus.settle();
 }
@@ -859,36 +861,57 @@ const HELP: [&str; 14] = [
     "?        toggle this help",
 ];
 
-fn draw_help(frame: &mut Frame) {
-    let col = HELP.iter().map(|l| l.chars().count()).max().unwrap_or(0);
-    let (left, right) = HELP.split_at(HELP.len().div_ceil(2));
-    let two: Vec<String> = left
+/// `HELP` in `n` columns, read down then across.
+fn help_columns(n: usize) -> Vec<String> {
+    let columns: Vec<&[&str]> = HELP.chunks(HELP.len().div_ceil(n)).collect();
+    let widths: Vec<usize> = columns
         .iter()
-        .zip(right.iter().chain([&""]))
-        .map(|(l, r)| format!("{l:<col$}  {r}"))
+        .map(|c| c.iter().map(|l| l.chars().count()).max().unwrap_or(0))
         .collect();
+    (0..columns[0].len())
+        .map(|row| {
+            let cells: Vec<String> = columns
+                .iter()
+                .zip(&widths)
+                .filter_map(|(c, w)| c.get(row).map(|l| format!("{l:<w$}")))
+                .collect();
+            cells.join("  ").trim_end().to_string()
+        })
+        .collect()
+}
+
+/// Clamps `scroll` to the lines that do not fit.
+fn draw_help(frame: &mut Frame, scroll: &mut usize) {
+    let area = frame.area();
+    let rows = (area.height as usize).saturating_sub(2).max(1);
     // text plus border and padding
     let width = |lines: &[String]| lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) + 4;
-    let area = frame.area();
-    let lines = if area.height < HELP.len() as u16 + 2 && width(&two) <= area.width as usize {
-        two
-    } else {
-        HELP.map(String::from).to_vec()
-    };
-    let width = width(&lines);
-    let [area] = Layout::horizontal([Constraint::Length(width as u16)])
-        .flex(Flex::Center)
-        .areas(frame.area());
-    let [area] = Layout::vertical([Constraint::Length(lines.len() as u16 + 2)])
+    // enough columns to show every line, fewer when they do not fit across
+    let lines = (1..=HELP.len().div_ceil(rows))
+        .rev()
+        .map(help_columns)
+        .find(|lines| width(lines) <= area.width as usize)
+        .unwrap_or_else(|| help_columns(1));
+    let shown = lines.len().min(rows);
+    *scroll = (*scroll).min(lines.len() - shown);
+    let [area] = Layout::horizontal([Constraint::Length(width(&lines) as u16)])
         .flex(Flex::Center)
         .areas(area);
-    let block = Block::bordered()
+    let [area] = Layout::vertical([Constraint::Length(shown as u16 + 2)])
+        .flex(Flex::Center)
+        .areas(area);
+    let mut block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .title(" help ")
+        .title(if *scroll > 0 { " help ↑ " } else { " help " })
         .padding(Padding::horizontal(1));
+    if *scroll + shown < lines.len() {
+        block = block.title_bottom(" ↓ ");
+    }
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(lines.into_iter().map(Line::from).collect::<Vec<_>>()).block(block),
+        Paragraph::new(lines.into_iter().map(Line::from).collect::<Vec<_>>())
+            .block(block)
+            .scroll((*scroll as u16, 0)),
         area,
     );
 }
@@ -1635,6 +1658,7 @@ mod tests {
     fn view() -> View {
         View {
             help: false,
+            help_scroll: 0,
             cores: false,
             all_ports: false,
             theme: Theme::ayu_mirage(),
@@ -1670,12 +1694,59 @@ mod tests {
                 );
             }
         }
-        // too narrow for two columns: one, cut at the bottom
+        // too narrow for two columns: one, scrolled
         let lines = text(&draw_view((60, 12), mockup(), &mut view));
         assert!(
             !lines.iter().any(|l| l.contains("g G") && l.contains("e c")),
             "{lines:#?}"
         );
+        assert!(lines.iter().any(|l| l.contains(HELP[0])), "{lines:#?}");
+    }
+
+    #[test]
+    fn help_takes_more_columns_in_a_wide_short_pane() {
+        let mut view = View {
+            help: true,
+            ..view()
+        };
+        // 4 rows need 4 columns, 125 wide; 5 rows fit in 3
+        for size in [(130, 6), (120, 7)] {
+            let lines = text(&draw_view(size, mockup(), &mut view));
+            for help in HELP {
+                assert!(
+                    lines.iter().any(|l| l.contains(help)),
+                    "{size:?} {help} {lines:#?}"
+                );
+            }
+            assert!(!lines.iter().any(|l| l.contains("╰ ↓ ")), "{lines:#?}");
+        }
+    }
+
+    #[test]
+    fn help_scrolls_when_too_short_and_narrow() {
+        let mut view = View {
+            help: true,
+            ..view()
+        };
+        let last = HELP[HELP.len() - 1];
+        // two columns of 7 rows in 6: the last row is below
+        let lines = text(&draw_view((74, 8), mockup(), &mut view));
+        assert!(!lines.iter().any(|l| l.contains(last)), "{lines:#?}");
+        assert!(
+            lines[7].contains("╰ ↓ ") && !lines[0].contains('↑'),
+            "{lines:#?}"
+        );
+        view.help_scroll = 99;
+        let lines = text(&draw_view((74, 8), mockup(), &mut view));
+        assert_eq!(view.help_scroll, 1);
+        assert!(lines.iter().any(|l| l.contains(last)), "{lines:#?}");
+        assert!(
+            lines[0].contains(" help ↑ ") && !lines[7].contains('↓'),
+            "{lines:#?}"
+        );
+        // a pane with room shows it all, back at the top
+        let lines = text(&draw_view((74, 16), mockup(), &mut view));
+        assert_eq!(view.help_scroll, 0);
         assert!(lines.iter().any(|l| l.contains(HELP[0])), "{lines:#?}");
     }
 
