@@ -90,7 +90,7 @@ impl App {
 }
 
 fn main() -> io::Result<ExitCode> {
-    let opts = match cli::parse(std::env::args().skip(1)) {
+    let opts = match cli::parse(std::env::args_os().skip(1)) {
         Ok(Action::Run(opts)) => opts,
         Ok(Action::Help) => {
             println!("{}", cli::USAGE);
