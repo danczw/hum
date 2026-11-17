@@ -76,6 +76,10 @@ fn agent(name: String) -> Result<String, String> {
             "--agent takes a program name, without '/' or a leading '-', got '{name}'"
         ));
     }
+    // a runtime as agent would turn every script it runs into an agent
+    if crate::agents::is_runtime(&name) {
+        return Err(format!("--agent cannot name the interpreter '{name}'"));
+    }
     Ok(name)
 }
 
@@ -145,6 +149,14 @@ mod tests {
         assert!(parse([bad]).is_err());
         let bad = OsString::from_vec(vec![0xff]);
         assert!(parse([OsString::from("--agent"), bad]).is_err());
+    }
+
+    #[test]
+    fn agent_cannot_be_a_runtime() {
+        for runtime in ["node", "bun", "deno", "python", "python3.12"] {
+            assert!(run(&["--agent", runtime]).is_err(), "{runtime}");
+        }
+        assert!(run(&["--agent", "nodemon"]).is_ok());
     }
 
     #[test]
