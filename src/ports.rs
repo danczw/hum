@@ -10,6 +10,8 @@ const TCP_LISTEN: u8 = 0x0A;
 pub struct Listener {
     pub port: u16,
     pub pid: Option<Pid>,
+    /// Bound to an address beyond loopback, so other machines may reach it.
+    pub public: bool,
 }
 
 /// Listening TCP ports (IPv4 and IPv6) read from /proc. Linux only.
@@ -24,16 +26,17 @@ pub fn listening(sys: &System) -> Vec<Listener> {
                 .skip(1)
                 .filter_map(parse_line)
                 .filter(|s| s.state == TCP_LISTEN)
-                .map(|s| (s.port, s.inode)),
+                .map(|s| (s.port, s.inode, is_public(s.addr))),
         );
     }
 
-    let wanted: HashSet<u64> = sockets.iter().map(|&(_, inode)| inode).collect();
+    let wanted: HashSet<u64> = sockets.iter().map(|&(_, inode, _)| inode).collect();
     let holders = socket_holders(&wanted);
     let mut listeners: Vec<Listener> = sockets
         .into_iter()
-        .map(|(port, inode)| Listener {
+        .map(|(port, inode, public)| Listener {
             port,
+            public,
             // Prefork servers (nginx, gunicorn) share one listen socket
             // between a master and its workers; show the master.
             pid: holders.get(&inode).and_then(|pids| {
@@ -46,14 +49,30 @@ pub fn listening(sys: &System) -> Vec<Listener> {
         })
         .collect();
     listeners.sort_by_key(|l| (l.port, l.pid));
-    listeners.dedup_by_key(|l| (l.port, l.pid));
-    listeners
+    merge(listeners)
+}
+
+/// Folds sorted listeners of one port and pid into one, public if any of
+/// them is: a server bound to both 127.0.0.1 and 0.0.0.0 shows once.
+fn merge(listeners: Vec<Listener>) -> Vec<Listener> {
+    let mut merged: Vec<Listener> = Vec::with_capacity(listeners.len());
+    for l in listeners {
+        match merged.last_mut() {
+            Some(last) if (last.port, last.pid) == (l.port, l.pid) => last.public |= l.public,
+            _ => merged.push(l),
+        }
+    }
+    merged
+}
+
+/// Anything but 127.0.0.0/8 and ::1, IPv4-mapped loopback included.
+fn is_public(addr: IpAddr) -> bool {
+    !addr.to_canonical().is_loopback()
 }
 
 /// One row of /proc/net/tcp or /proc/net/tcp6.
 #[derive(Debug, PartialEq)]
 struct TcpSocket {
-    #[allow(dead_code)] // read by bind scope, #12
     addr: IpAddr,
     port: u16,
     state: u8,
@@ -170,6 +189,37 @@ mod tests {
         );
         let any = parse_line(ANY6).unwrap();
         assert_eq!((any.addr, any.port), (Ipv6Addr::UNSPECIFIED.into(), 22));
+    }
+
+    #[test]
+    #[cfg(target_endian = "little")]
+    fn loopback_binds_are_not_public() {
+        let public = |line| is_public(parse_line(line).unwrap().addr);
+        assert!(!public(LOOPBACK));
+        assert!(!public(LOOPBACK6));
+        assert!(public(ANY));
+        assert!(public(ANY6));
+        assert!(is_public(Ipv4Addr::new(192, 168, 1, 5).into()));
+        assert!(!is_public(Ipv4Addr::new(127, 0, 1, 1).into()));
+        assert!(!is_public(Ipv4Addr::LOCALHOST.to_ipv6_mapped().into()));
+    }
+
+    #[test]
+    fn one_port_and_pid_shows_once_public_if_any_bind_is() {
+        let l = |port, pid: u32, public| Listener {
+            port,
+            pid: Some(Pid::from_u32(pid)),
+            public,
+        };
+        let merged = merge(vec![l(3000, 7, false), l(3000, 7, true), l(3000, 8, false)]);
+        let got: Vec<_> = merged.iter().map(|l| (l.port, l.pid, l.public)).collect();
+        assert_eq!(
+            got,
+            [
+                (3000, Some(Pid::from_u32(7)), true),
+                (3000, Some(Pid::from_u32(8)), false)
+            ]
+        );
     }
 
     #[test]
