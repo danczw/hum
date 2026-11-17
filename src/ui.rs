@@ -625,7 +625,7 @@ fn draw_footer(frame: &mut Frame, section: Section, area: Rect, theme: &Theme, f
     let mut shown = 0;
     for (i, entry) in entries.iter().enumerate() {
         let sep = if i == 0 { " · " } else { "  " };
-        let len = sep.chars().count() + entry.chars().count();
+        let len = sep.chars().count() + Span::raw(entry).width();
         // keep room for `  +N` after this entry
         let rest = entries.len() - i - 1;
         let tail = if rest == 0 {
