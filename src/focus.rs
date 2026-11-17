@@ -78,6 +78,13 @@ impl Pane {
         }
     }
 
+    /// Shows none of the section's rows this frame, so `Tab` passes over it.
+    /// The cursor keeps its row for when they show again.
+    pub fn hide(&mut self) {
+        self.keys.clear();
+        self.page = 1;
+    }
+
     fn select(&mut self, index: usize) {
         if let Some(last) = self.keys.len().checked_sub(1) {
             self.index = index.min(last);
