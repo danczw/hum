@@ -6,7 +6,7 @@ A small terminal monitor for machines running coding agents. Built with [ratatui
 
 - CPU, memory and swap
 - Agents (claude, codex, aider, gemini, ...) with their process trees, marked `●` while busy and `○` while idle
-- Listening TCP ports of agents and orphans, tagged with their owner. A `*` after the port (`:3000*`) means it is bound beyond loopback and other machines may reach it; `a` shows every port
+- Listening TCP ports of agents and orphans, tagged with their owner. A `*` after the port (`:3000*`) marks a bind to a non-loopback address such as `0.0.0.0`; `a` shows every port
 - Orphans: processes an agent started that outlived their parent. Claude Code marks its processes, so its orphans show even when they predate hum; for other agents hum catches them only while it runs
 
 ```sh
