@@ -26,6 +26,9 @@ const RUNTIMES: &[&str] = &["node", "bun", "deno", "python"];
 /// pid, by agent kind. Add one only once verified on a real session.
 const MARKERS: &[(&str, &str)] = &[("claude", "CLAUDE_PID")];
 
+/// An agent kind and the agent pid its marker holds.
+type Marker = (&'static str, Pid);
+
 /// Ticks of tree cpu averaged to call a session busy; one tick a second.
 const BUSY_WINDOW: usize = 5;
 /// Mean tree cpu, in cores, above which a session counts as busy. A claude
@@ -302,9 +305,10 @@ impl OrphanTracker {
 pub struct EnvOrphans {
     /// hum itself inherits the markers when started from an agent's shell.
     me: Pid,
-    /// (pid, start time) -> marker; None when unmarked or unreadable. The
-    /// environment is fixed at exec, so each process is read once.
-    markers: HashMap<Key, Option<(&'static str, Pid)>>,
+    /// pid -> (start time, marker); start time guards against pid reuse.
+    /// The marker is None when unset or unreadable. The environment is
+    /// fixed at exec, so each process is read once.
+    markers: HashMap<Pid, (u64, Option<Marker>)>,
 }
 
 impl EnvOrphans {
@@ -315,8 +319,8 @@ impl EnvOrphans {
         }
     }
 
-    /// Lists marked processes outside every agent tree. `read` returns a
-    /// pid's raw environ, see [`read_environ`].
+    /// Lists marked processes outside every agent tree, unsorted. `read`
+    /// returns a pid's raw environ, see [`read_environ`].
     pub fn update(
         &mut self,
         procs: &HashMap<Pid, ProcInfo>,
@@ -324,27 +328,32 @@ impl EnvOrphans {
         home: Option<&Path>,
         mut read: impl FnMut(Pid) -> Option<Vec<u8>>,
     ) -> Vec<Orphan> {
-        let alive: HashSet<Key> = procs.values().map(|p| key(p.pid, p.start)).collect();
-        self.markers.retain(|k, _| alive.contains(k));
+        self.markers
+            .retain(|pid, (start, _)| procs.get(pid).is_some_and(|p| p.start == *start));
 
         let tracked: HashSet<Pid> = agents
             .iter()
             .flat_map(|a| a.procs.iter().map(|p| p.pid))
             .collect();
-        let mut orphans: Vec<Orphan> = procs
+        procs
             .values()
             .filter(|p| p.pid != self.me && !tracked.contains(&p.pid))
             .filter_map(|p| {
-                let (kind, agent) = *self
+                let (kind, agent) = self
                     .markers
-                    .entry(key(p.pid, p.start))
-                    .or_insert_with(|| marker(&read(p.pid)?))
-                    .as_ref()?;
+                    .entry(p.pid)
+                    .or_insert_with(|| (p.start, read(p.pid).and_then(|env| marker(&env))))
+                    .1?;
+                // Still under its agent, which scan did not recognise as a
+                // session, e.g. `node cli.js`.
+                if std::iter::successors(p.parent, |p| procs.get(p)?.parent).any(|p| p == agent) {
+                    return None;
+                }
                 // A reused pid is younger than the processes it marks.
-                let project = procs
+                let agent = procs
                     .get(&agent)
-                    .filter(|a| a.start <= p.start && agent_kind(&a.name, &a.cmd) == Some(kind))
-                    .map_or_else(|| "?".into(), |a| project(a.cwd.as_deref(), home));
+                    .filter(|a| a.start <= p.start && agent_kind(&a.name, &a.cmd) == Some(kind));
+                let project = agent.map_or_else(|| "?".into(), |a| project(a.cwd.as_deref(), home));
                 Some(Orphan {
                     pid: p.pid,
                     name: display_name(&p.name, &p.cmd),
@@ -354,9 +363,7 @@ impl EnvOrphans {
                     mem: p.mem,
                 })
             })
-            .collect();
-        orphans.sort_by_key(|o| o.pid);
-        orphans
+            .collect()
     }
 }
 
@@ -365,7 +372,7 @@ pub fn read_environ(pid: Pid) -> Option<Vec<u8>> {
 }
 
 /// The first [`MARKERS`] entry set in a raw `/proc/<pid>/environ`.
-fn marker(environ: &[u8]) -> Option<(&'static str, Pid)> {
+fn marker(environ: &[u8]) -> Option<Marker> {
     environ.split(|&b| b == 0).find_map(|var| {
         let var = std::str::from_utf8(var).ok()?;
         let (name, value) = var.split_once('=')?;
@@ -664,6 +671,12 @@ mod tests {
             proc(99, 11, 199, "hum"),
         ]);
         assert!(env_orphans(&procs, &[11, 20, 99], 10).is_empty());
+    }
+
+    #[test]
+    fn marked_child_of_unrecognised_claude_is_not_orphan() {
+        let procs = HashMap::from([proc(20, 1, 200, "node cli.js"), proc(21, 20, 201, "bash")]);
+        assert!(env_orphans(&procs, &[21], 20).is_empty());
     }
 
     #[test]
