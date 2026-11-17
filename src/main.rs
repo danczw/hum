@@ -79,6 +79,7 @@ fn main() -> io::Result<()> {
     let mut app = App::new()?;
     let mut view = View {
         help: false,
+        cores: false,
         theme: Theme::from_env(),
         focus: Focus::default(),
         trees: Trees::default(),
@@ -128,6 +129,7 @@ fn run(mut terminal: DefaultTerminal, app: &mut App, view: &mut View) -> io::Res
                 KeyCode::Char('h') | KeyCode::Left => view.fold(agents, Fold::Collapse),
                 KeyCode::Char('e') => view.trees.expand_all(agents),
                 KeyCode::Char('c') => view.trees.collapse_all(),
+                KeyCode::Char('1') => view.cores = !view.cores,
                 _ => {}
             }
         }
