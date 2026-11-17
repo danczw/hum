@@ -21,8 +21,10 @@ const RUNTIMES: &[&str] = &["node", "bun", "deno", "python"];
 
 /// Ticks of tree cpu averaged to call a session busy; one tick a second.
 const BUSY_WINDOW: usize = 5;
-/// Mean tree cpu, in cores, above which a session counts as busy.
-const BUSY_CORES: f32 = 0.05;
+/// Mean tree cpu, in cores, above which a session counts as busy. A claude
+/// session idle at its prompt measured 0.006 to 0.024, one waiting on a tool
+/// 0.04 to 0.07.
+const BUSY_CORES: f32 = 0.03;
 
 /// The process fields detection needs, copied out of sysinfo so detection
 /// runs on plain data.
