@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
@@ -18,6 +18,11 @@ const AGENTS: &[&str] = &[
 /// Interpreters that may run an agent as a script, e.g. `node /usr/bin/codex`.
 /// Version suffixes are ignored, so `python3.12` counts as `python`.
 const RUNTIMES: &[&str] = &["node", "bun", "deno", "python"];
+
+/// Ticks of tree cpu averaged to call a session busy; one tick a second.
+const BUSY_WINDOW: usize = 5;
+/// Mean tree cpu, in cores, above which a session counts as busy.
+const BUSY_CORES: f32 = 0.05;
 
 /// The process fields detection needs, copied out of sysinfo so detection
 /// runs on plain data.
@@ -68,6 +73,8 @@ pub struct Agent {
     pub project: String,
     /// The agent process first, then its descendants depth-first.
     pub procs: Vec<Proc>,
+    /// Set by [`BusyTracker::update`]; false until a window of samples exists.
+    pub busy: bool,
 }
 
 impl Agent {
@@ -114,6 +121,7 @@ pub fn scan(procs: &HashMap<Pid, ProcInfo>, home: Option<&Path>) -> Vec<Agent> {
                 kind,
                 project: project(procs[&pid].cwd.as_deref(), home),
                 procs: tree,
+                busy: false,
             }
         })
         .collect();
@@ -276,6 +284,35 @@ impl OrphanTracker {
             .collect();
         orphans.sort_by_key(|o| o.pid);
         orphans
+    }
+}
+
+/// Remembers each session's recent tree cpu to tell busy from idle.
+#[derive(Default)]
+pub struct BusyTracker {
+    /// (root pid, start time) -> tree cpu per tick, newest last; start time
+    /// guards against pid reuse.
+    samples: HashMap<(Pid, u64), VecDeque<f32>>,
+}
+
+impl BusyTracker {
+    pub fn update(&mut self, agents: &mut [Agent]) {
+        let roots: HashSet<(Pid, u64)> = agents
+            .iter()
+            .map(|a| (a.procs[0].pid, a.procs[0].start))
+            .collect();
+        self.samples.retain(|root, _| roots.contains(root));
+        for agent in agents {
+            let root = &agent.procs[0];
+            let window = self.samples.entry((root.pid, root.start)).or_default();
+            if window.len() == BUSY_WINDOW {
+                window.pop_front();
+            }
+            window.push_back(agent.cpu());
+            // cpu is in percent of one core
+            let mean = window.iter().sum::<f32>() / BUSY_WINDOW as f32 / 100.0;
+            agent.busy = window.len() == BUSY_WINDOW && mean > BUSY_CORES;
+        }
     }
 }
 
@@ -460,6 +497,56 @@ mod tests {
         let agents = scan(&procs, home());
         assert_eq!(agents[0].procs[0].pid.as_u32(), 12);
         assert_eq!(pids(&tracker.update(&procs, &agents)), [11]);
+    }
+
+    /// One claude session at `pid` whose tree uses `cores`.
+    fn session(pid: u32, start: u64, cores: f32) -> Vec<Agent> {
+        let (pid, mut info) = proc(pid, 1, start, "claude");
+        info.cpu = cores * 100.0;
+        scan(&HashMap::from([(pid, info)]), home())
+    }
+
+    /// Feeds `ticks` samples of `cores` and returns whether the last one
+    /// called the session busy.
+    fn busy_after(busy: &mut BusyTracker, ticks: usize, cores: f32) -> bool {
+        let mut agents = Vec::new();
+        for _ in 0..ticks {
+            agents = session(10, 100, cores);
+            busy.update(&mut agents);
+        }
+        agents[0].busy
+    }
+
+    #[test]
+    fn new_session_idle_until_window_fills() {
+        let mut busy = BusyTracker::default();
+        assert!(!busy_after(&mut busy, BUSY_WINDOW - 1, 1.0));
+        assert!(busy_after(&mut busy, 1, 1.0));
+    }
+
+    #[test]
+    fn quiet_session_turns_idle_within_window() {
+        let mut busy = BusyTracker::default();
+        assert!(busy_after(&mut busy, BUSY_WINDOW, 1.0));
+        assert!(!busy_after(&mut busy, BUSY_WINDOW, 0.0));
+        assert!(!busy_after(&mut busy, BUSY_WINDOW, BUSY_CORES));
+    }
+
+    #[test]
+    fn exited_session_drops_history() {
+        let mut busy = BusyTracker::default();
+        busy_after(&mut busy, BUSY_WINDOW, 1.0);
+        busy.update(&mut []);
+        assert!(busy.samples.is_empty());
+    }
+
+    #[test]
+    fn reused_pid_starts_fresh() {
+        let mut busy = BusyTracker::default();
+        busy_after(&mut busy, BUSY_WINDOW, 1.0);
+        let mut agents = session(10, 500, 1.0);
+        busy.update(&mut agents);
+        assert!(!agents[0].busy);
     }
 
     #[test]
