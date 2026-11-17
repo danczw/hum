@@ -1,6 +1,12 @@
+use sysinfo::Pid;
+
 /// Names a row across ticks so the cursor follows it when rows reorder:
 /// `(pid, start time)` for processes, `(port, pid)` for ports.
 pub type Key = (u64, u64);
+
+pub fn key(pid: Pid, start: u64) -> Key {
+    (pid.as_u32().into(), start)
+}
 
 /// Sections in the order `Tab` cycles through.
 pub const AGENTS: usize = 0;
@@ -92,6 +98,16 @@ pub struct Focus {
 impl Focus {
     pub fn pane(&mut self, section: usize) -> &mut Pane {
         &mut self.panes[section]
+    }
+
+    /// The row the cursor of `section` is on, shown or not.
+    pub fn selected(&self, section: usize) -> Option<Key> {
+        self.panes[section].key
+    }
+
+    /// Puts the cursor of `section` on `key` from the next frame on.
+    pub fn select(&mut self, section: usize, key: Key) {
+        self.panes[section].key = Some(key);
     }
 
     /// Whether `section` draws its cursor and an accent title.
