@@ -124,13 +124,14 @@ fn main() -> io::Result<ExitCode> {
 }
 
 fn run(mut terminal: DefaultTerminal, app: &mut App, view: &mut View) -> io::Result<()> {
-    app.refresh();
+    // stamped before the refresh so its run time does not stretch the period
     let mut last_tick = Instant::now();
+    app.refresh();
 
     loop {
         if last_tick.elapsed() >= app.tick {
-            app.refresh();
             last_tick = Instant::now();
+            app.refresh();
         }
 
         terminal.draw(|frame| ui::draw(frame, app, view))?;
