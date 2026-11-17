@@ -842,34 +842,38 @@ fn title(section: &Section, shows: bool, theme: &Theme) -> Vec<Span<'static>> {
     ]
 }
 
+/// The help popup, one line per key.
+const HELP: [&str; 14] = [
+    "j k ↑ ↓  move the cursor",
+    "g G      first, last row",
+    "PgUp/Dn  move a page",
+    "Tab      next section",
+    "S-Tab    previous section",
+    "Enter ␣  toggle agent tree",
+    "l →      expand agent tree",
+    "h ←      collapse, or go to root",
+    "e c      expand, collapse all",
+    "1        per-core cpu",
+    "a        all or agent ports",
+    "Esc      close help/cursor, quit",
+    "q        quit",
+    "?        toggle this help",
+];
+
 fn draw_help(frame: &mut Frame) {
-    let lines = [
-        "j k ↑ ↓  move the cursor",
-        "g G      first, last row",
-        "PgUp/Dn  move a page",
-        "Tab      next section",
-        "S-Tab    previous section",
-        "Enter ␣  toggle agent tree",
-        "l →      expand agent tree",
-        "h ←      collapse, or go to root",
-        "e c      expand, collapse all",
-        "1        per-core cpu",
-        "a        all or agent ports",
-        "Esc      close help/cursor, quit",
-        "q        quit",
-        "?        toggle this help",
-    ];
-    let col = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
-    // too short for one column: two side by side
-    let lines: Vec<String> = if frame.area().height < lines.len() as u16 + 2 {
-        let (left, right) = lines.split_at(lines.len().div_ceil(2));
-        left.iter()
-            .zip(right.iter().chain([&""]))
-            .map(|(l, r)| format!("{l:<col$}  {r}"))
-            .collect()
-    } else {
-        lines.map(String::from).to_vec()
-    };
+    let col = HELP.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    // too short for one column: two side by side, if they fit across
+    let area = frame.area();
+    let lines: Vec<String> =
+        if area.height < HELP.len() as u16 + 2 && area.width >= 2 * col as u16 + 6 {
+            let (left, right) = HELP.split_at(HELP.len().div_ceil(2));
+            left.iter()
+                .zip(right.iter().chain([&""]))
+                .map(|(l, r)| format!("{l:<col$}  {r}"))
+                .collect()
+        } else {
+            HELP.map(String::from).to_vec()
+        };
     let width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) + 4;
     let [area] = Layout::horizontal([Constraint::Length(width as u16)])
         .flex(Flex::Center)
@@ -1648,29 +1652,30 @@ mod tests {
             help: true,
             ..view()
         };
-        for size in [(74, 10), (74, 30)] {
-            let buf = draw_view(size, mockup(), &mut view);
-            let lines = text(&buf);
-            let keys = [
-                "j k ↑ ↓",
-                "g G",
-                "PgUp/Dn",
-                "Tab",
-                "S-Tab",
-                "Enter ␣",
-                "l →",
-                "h ←",
-                "e c",
-                "1        per-core",
-                "a        all",
-                "Esc",
-                "q        quit",
-                "?        toggle",
-            ];
-            for key in keys {
-                assert!(lines.iter().any(|l| l.contains(key)), "{key} {lines:#?}");
+        // too short for one column: two, with every line shown
+        for (size, two) in [
+            ((74, 10), true),
+            ((74, 15), true),
+            ((74, 16), false),
+            ((74, 30), false),
+        ] {
+            let lines = text(&draw_view(size, mockup(), &mut view));
+            let side_by_side = lines.iter().any(|l| l.contains("g G") && l.contains("e c"));
+            assert_eq!(side_by_side, two, "{size:?} {lines:#?}");
+            for help in HELP {
+                assert!(
+                    lines.iter().any(|l| l.contains(help)),
+                    "{size:?} {help} {lines:#?}"
+                );
             }
         }
+        // too narrow for two columns: one, cut at the bottom
+        let lines = text(&draw_view((60, 12), mockup(), &mut view));
+        assert!(
+            !lines.iter().any(|l| l.contains("g G") && l.contains("e c")),
+            "{lines:#?}"
+        );
+        assert!(lines.iter().any(|l| l.contains(HELP[0])), "{lines:#?}");
     }
 
     #[test]
