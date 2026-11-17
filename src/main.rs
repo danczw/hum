@@ -127,7 +127,7 @@ fn run(mut terminal: DefaultTerminal, app: &mut App, view: &mut View) -> io::Res
                 KeyCode::Char('l') | KeyCode::Right => view.fold(agents, Fold::Expand),
                 KeyCode::Char('h') | KeyCode::Left => view.fold(agents, Fold::Collapse),
                 KeyCode::Char('e') => view.trees.expand_all(agents),
-                KeyCode::Char('c') => view.collapse_all(agents),
+                KeyCode::Char('c') => view.trees.collapse_all(),
                 _ => {}
             }
         }
