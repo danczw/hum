@@ -40,9 +40,14 @@ impl Trees {
         self.open.clear();
     }
 
-    /// Forgets the sessions that exited.
+    /// Forgets the sessions that exited or have no children left, so
+    /// children spawned later start collapsed.
     pub fn retain(&mut self, agents: &[Agent]) {
-        let roots: HashSet<Key> = agents.iter().map(root).collect();
+        let roots: HashSet<Key> = agents
+            .iter()
+            .filter(|a| a.procs.len() > 1)
+            .map(root)
+            .collect();
         self.open.retain(|k| roots.contains(k));
     }
 }
@@ -105,6 +110,16 @@ mod tests {
         let now = agents(&[10, 20]);
         assert!(!trees.is_open(root(&now[0])));
         assert!(trees.is_open(root(&now[1])));
+    }
+
+    #[test]
+    fn a_tree_whose_children_exited_closes() {
+        let mut trees = Trees::default();
+        trees.expand_all(&agents(&[10]));
+        let mut now = agents(&[10]);
+        now[0].procs.truncate(1);
+        trees.retain(&now);
+        assert!(!trees.is_open(root(&agents(&[10])[0])));
     }
 
     #[test]
