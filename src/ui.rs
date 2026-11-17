@@ -52,8 +52,10 @@ const WIDE: u16 = AGENTS_MIN + SIDE_MIN;
 /// box, see [`stack`].
 const AIRY: u16 = 12;
 
-/// Between the gauges on their line and between columns of core bars.
+/// Between the gauges on their line.
 const GAP: u16 = 3;
+/// Between columns of core bars; their brackets already set them apart.
+const CORE_GAP: u16 = 2;
 /// Per-core bars get at least this many cells.
 const CORE_BAR: u16 = 8;
 
@@ -255,10 +257,10 @@ fn render(frame: &mut Frame, screen: &Screen, view: &mut View) {
     focus.settle();
 }
 
-/// `cpu ⣿⣿⡆⠀ 34%   mem ⣿⣿⣿⠀ 12.1/31G   swp ⡀⠀⠀⠀ 0.0/8G` on one line. The
-/// bars share one length so they compare at a glance, and stretch to fill
-/// the line. The unused part stays blank, no track. Each bar takes one
-/// color from its load.
+/// `cpu [⣿⣿⡆⠀  34%]   mem [⣿⣿⣿⠀ 12.1/31G]   swp [⡀⠀⠀⠀ 0.0/8G]` on one
+/// line, bracketed as in htop. The bars share one length so they compare at
+/// a glance, and stretch to fill the line. The unused part stays blank, no
+/// track. Each bar takes one color from its load.
 fn draw_gauges(frame: &mut Frame, screen: &Screen, area: Rect, theme: &Theme) {
     let gauges = [
         (
@@ -271,9 +273,9 @@ fn draw_gauges(frame: &mut Frame, screen: &Screen, area: Rect, theme: &Theme) {
         ("mem", ratio(screen.mem), usage_label(screen.mem), "G"),
         ("swp", ratio(screen.swap), usage_label(screen.swap), "G"),
     ];
-    // name, space, bar, space, value, unit
+    // name, ` [`, bar, space, value, unit, `]`
     let text = |(name, _, value, unit): &(&str, f64, String, &str)| {
-        name.len() + value.len() + unit.len() + 2
+        name.len() + value.len() + unit.len() + 4
     };
     let fixed: usize = gauges.iter().map(text).sum::<usize>() + usize::from(GAP) * 2;
     let bar = usize::from(area.width).saturating_sub(fixed) / gauges.len();
@@ -285,12 +287,13 @@ fn draw_gauges(frame: &mut Frame, screen: &Screen, area: Rect, theme: &Theme) {
         let (used, unused) = braille_bar(ratio, bar);
         let line = Line::from(vec![
             Span::styled(name, theme.dim),
-            Span::raw(" "),
+            Span::styled(" [", theme.dim),
             Span::styled(used, theme.load(ratio)),
             Span::styled(unused, theme.dim),
             Span::raw(" "),
             Span::raw(value),
             Span::styled(unit, theme.dim),
+            Span::styled("]", theme.dim),
         ]);
         frame.render_widget(line, area);
     }
@@ -321,12 +324,12 @@ impl CoreGrid {
                 index,
             };
         }
-        // index, space, space, ` 77%`
-        let fixed = index + 2 + 4;
-        let fit = (width + GAP) / (fixed + CORE_BAR + GAP);
+        // index, ` [`, ` 77%]`
+        let fixed = index + 2 + 6;
+        let fit = (width + CORE_GAP) / (fixed + CORE_BAR + CORE_GAP);
         let rows = cores.div_ceil(fit.clamp(1, cores));
         let cols = cores.div_ceil(rows);
-        let bar = (width.saturating_sub((cols - 1) * GAP) / cols).saturating_sub(fixed);
+        let bar = (width.saturating_sub((cols - 1) * CORE_GAP) / cols).saturating_sub(fixed);
         Self {
             cols,
             rows,
@@ -335,16 +338,16 @@ impl CoreGrid {
         }
     }
 
-    /// One core's cell: index, space, bar, space, percent.
+    /// One core's cell: index, space, bar and percent in brackets.
     fn cell(&self) -> u16 {
-        self.index + self.bar + 6
+        self.index + self.bar + 8
     }
 }
 
-/// ` 5 ⣿⣿⣿⣿⣿⣿⡆⠀⠀  77%` per core, filling down each column first. The bar
-/// takes its load color and the rest stays dim, apart from the gauge line.
-/// When `area` is shorter than the grid, the last cell counts the cores left
-/// out as `+N cores`.
+/// ` 5 [⣿⣿⣿⣿⣿⣿⡆⠀⠀  77%]` per core, as in htop, filling down each column
+/// first. The bar takes its load color and the rest stays dim, to set the
+/// grid apart from the gauge line. When `area` is shorter than the grid, the
+/// last cell counts the cores left out as `+N cores`.
 fn draw_cores(frame: &mut Frame, cores: &[f64], grid: CoreGrid, area: Rect, theme: &Theme) {
     let rows = usize::from(area.height);
     if rows == 0 {
@@ -358,7 +361,7 @@ fn draw_cores(frame: &mut Frame, cores: &[f64], grid: CoreGrid, area: Rect, them
     };
     let cols: Vec<Rect> =
         Layout::horizontal(vec![Constraint::Length(grid.cell()); grid.cols.into()])
-            .spacing(GAP)
+            .spacing(CORE_GAP)
             .split(area)
             .to_vec();
     let at = |i: usize| Rect {
@@ -369,10 +372,10 @@ fn draw_cores(frame: &mut Frame, cores: &[f64], grid: CoreGrid, area: Rect, them
     for (i, &ratio) in cores.iter().enumerate().take(shown) {
         let (used, unused) = braille_bar(ratio, grid.bar.into());
         let line = Line::from(vec![
-            Span::styled(format!("{i:>w$} ", w = usize::from(grid.index)), theme.dim),
+            Span::styled(format!("{i:>w$} [", w = usize::from(grid.index)), theme.dim),
             Span::styled(used, theme.load(ratio)),
             Span::styled(unused, theme.dim),
-            Span::styled(format!(" {:>3.0}%", ratio * 100.0), theme.dim),
+            Span::styled(format!(" {:>3.0}%]", ratio * 100.0), theme.dim),
         ]);
         frame.render_widget(line, at(i));
     }
@@ -1106,10 +1109,10 @@ mod tests {
         let theme = Theme::ayu_mirage();
         let buf = draw((74, 9), mockup(), theme);
         // cpu at 34% is low
-        assert_eq!(fg_at(&buf, "cpu ⣿", 4), fg(theme.load_low));
+        assert_eq!(fg_at(&buf, "cpu [⣿", 5), fg(theme.load_low));
         assert_eq!(fg_at(&buf, "cpu", 0), fg(theme.dim));
         assert_eq!(fg_at(&buf, "%", 0), fg(theme.dim));
-        assert_eq!(fg_at(&buf, "G ", 0), fg(theme.dim));
+        assert_eq!(fg_at(&buf, "G]", 0), fg(theme.dim));
     }
 
     #[test]
@@ -1123,8 +1126,8 @@ mod tests {
     #[test]
     fn small_pane_draws_the_mockup() {
         let lines = lines();
-        assert!(lines[0].starts_with("cpu ⣿"), "{}", lines[0]);
-        for label in [" 34%", "   mem ⣿", " 12.1/31G", "   swp ⡀", " 0.0/8G"] {
+        assert!(lines[0].starts_with("cpu [⣿"), "{}", lines[0]);
+        for label in [" 34%]", "   mem [⣿", " 12.1/31G]", "   swp [⡀", " 0.0/8G]"] {
             assert!(lines[0].contains(label), "{label:?} in {}", lines[0]);
         }
         assert_eq!(lines[1], format!("╭ agents: 3 {}╮", "─".repeat(61)));
@@ -1267,7 +1270,7 @@ mod tests {
     #[test]
     fn gauges_get_a_blank_row_below_when_rows_allow() {
         let lines = lines_at(16);
-        assert!(lines[0].starts_with("cpu ⣿"), "{}", lines[0]);
+        assert!(lines[0].starts_with("cpu [⣿"), "{}", lines[0]);
         assert_eq!(lines[1].trim(), "");
         assert!(lines[2].starts_with("╭ agents: 3 "), "{}", lines[2]);
     }
@@ -1648,7 +1651,7 @@ mod tests {
             })
             .collect();
         assert_eq!(starts, ["0 2 4 6", "1 3 5 7"], "{lines:#?}");
-        assert!(lines[2].ends_with(" 12% "), "{lines:#?}");
+        assert!(lines[2].ends_with(" 12%]"), "{lines:#?}");
         assert_eq!(lines[3].trim(), "");
         assert!(lines[4].starts_with("╭ agents: 3 "), "{lines:#?}");
         // off again, the sections move back up under the gauges
@@ -1660,19 +1663,19 @@ mod tests {
     fn core_bars_take_their_load_color_and_the_rest_is_dim() {
         let theme = Theme::ayu_mirage();
         let buf = draw_cores_view((74, 16), mockup(), eight_cores(), &mut cores_on());
-        assert_eq!(fg_at(&buf, "2 ⣿", 2), fg(theme.load_high));
-        assert_eq!(fg_at(&buf, "5 ⣿", 2), fg(theme.load_mid));
-        assert_eq!(fg_at(&buf, "7 ⣿", 2), fg(theme.load_low));
-        assert_eq!(fg_at(&buf, "2 ⣿", 0), fg(theme.dim));
-        assert_eq!(fg_at(&buf, "100%", 0), fg(theme.dim));
+        assert_eq!(fg_at(&buf, "2 [⣿", 3), fg(theme.load_high));
+        assert_eq!(fg_at(&buf, "5 [⣿", 3), fg(theme.load_mid));
+        assert_eq!(fg_at(&buf, "7 [⣿", 3), fg(theme.load_low));
+        assert_eq!(fg_at(&buf, "2 [⣿", 0), fg(theme.dim));
+        assert_eq!(fg_at(&buf, "100%]", 0), fg(theme.dim));
     }
 
     #[test]
     fn grid_packs_columns_without_an_empty_one() {
         let grid = CoreGrid::new(32, 148);
         assert_eq!((grid.cols, grid.rows), (7, 5));
-        assert!(grid.cols * (grid.cell() + GAP) - GAP <= 148);
-        // 9 columns would fit 8 cores, but one row of 8 leaves none empty
+        assert!(grid.cols * (grid.cell() + CORE_GAP) - CORE_GAP <= 148);
+        // more columns fit than there are cores
         assert_eq!(CoreGrid::new(8, 200).cols, 8);
         assert_eq!(CoreGrid::new(8, 200).rows, 1);
         assert_eq!(CoreGrid::new(0, 74).rows, 0);
@@ -1683,8 +1686,8 @@ mod tests {
         let cores = vec![0.1; 64];
         let lines = draw_cores_lines((74, 9), cores);
         assert!(lines[1..5].iter().all(|l| l.starts_with(' ')), "{lines:#?}");
-        // 4 rows of 4 columns, the last slot counting 64 - 15
-        assert!(lines[4].contains("   +49 cores"), "{lines:#?}");
+        // 4 rows of 3 columns, the last slot counting 64 - 11
+        assert!(lines[4].contains("  +53 cores"), "{lines:#?}");
         assert!(lines[5].starts_with("╭ agents: 3 "), "{lines:#?}");
     }
 
