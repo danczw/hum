@@ -842,7 +842,6 @@ fn title(section: &Section, shows: bool, theme: &Theme) -> Vec<Span<'static>> {
     ]
 }
 
-/// The help popup, one line per key.
 const HELP: [&str; 14] = [
     "j k ↑ ↓  move the cursor",
     "g G      first, last row",
@@ -870,7 +869,6 @@ fn draw_help(frame: &mut Frame) {
         .collect();
     // text plus border and padding
     let width = |lines: &[String]| lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) + 4;
-    // too short for one column: two side by side, if they fit across
     let area = frame.area();
     let lines = if area.height < HELP.len() as u16 + 2 && width(&two) <= area.width as usize {
         two
