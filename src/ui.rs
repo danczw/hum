@@ -165,7 +165,7 @@ struct Section {
     /// The section's cursor in [`Focus`].
     pane: usize,
     count: usize,
-    /// Rows a filter left out, as `ports: 2/7`; `None` when none were.
+    /// Rows before a filter, the 7 in `ports: 2/7`; `None` when it hid none.
     total: Option<usize>,
     /// Draws the count in the title; `None` keeps it dim like the rest.
     count_style: Option<Style>,
@@ -1297,7 +1297,10 @@ mod tests {
         );
         let postgres = lines.iter().find(|l| l.contains("postgres")).unwrap();
         assert!(postgres.starts_with("│ :5432 "), "{lines:#?}");
-        // a public port without an agent gets a plain `*`
+    }
+
+    #[test]
+    fn public_port_without_an_agent_gets_a_plain_star() {
         let ports = [PortRow {
             port: 22,
             pid: None,
