@@ -804,7 +804,6 @@ mod tests {
         scan(&HashMap::from([(pid, info)]), home())
     }
 
-    /// Ticks the tests' tracker averages.
     const WINDOW: usize = 5;
 
     /// Feeds `ticks` samples of `cores` and returns whether the last one
