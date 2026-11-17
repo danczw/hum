@@ -226,7 +226,12 @@ fn render(frame: &mut Frame, screen: &Screen, view: &mut View) {
     let grid = view
         .cores
         .then(|| CoreGrid::new(screen.cores.len(), area.width));
-    let grid_rows = grid.map_or(0, |g| g.rows.min(area.height / 2));
+    // the rows compact sections need for their titles: three stacked, two
+    // side by side
+    let titles = if area.width >= WIDE { 2 } else { 3 };
+    let grid_rows = grid.map_or(0, |g| {
+        g.rows.min(area.height / 2).min(area.height - 1 - titles)
+    });
     // the sections lay out like a pane as tall as the rows the grid leaves
     let compact = area.height - grid_rows < AIRY;
     let [gauges, cores, _, body] = Layout::vertical([
@@ -1655,6 +1660,17 @@ mod tests {
         // 4 rows of 3 columns, the last slot counting 64 - 11
         assert!(lines[4].contains("  +53 cores"), "{lines:#?}");
         assert!(lines[5].starts_with("╭ agents: 3 "), "{lines:#?}");
+    }
+
+    #[test]
+    fn grid_leaves_every_section_its_title() {
+        let lines = draw_cores_lines((74, 6), vec![0.1; 16]);
+        assert!(lines[3].starts_with("╭ agents: 3 "), "{lines:#?}");
+        assert!(lines[4].starts_with("├ orphans: 1 "), "{lines:#?}");
+        assert!(lines[5].starts_with("╰ ports: 2 "), "{lines:#?}");
+        let lines = draw_cores_lines((148, 6), vec![0.1; 64]);
+        assert!(lines[4].starts_with("╭ agents: 3 "), "{lines:#?}");
+        assert!(lines[5].contains("╯╰ ports: 2 "), "{lines:#?}");
     }
 
     #[test]
