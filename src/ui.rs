@@ -992,7 +992,7 @@ fn owner(app: &App, pid: Pid) -> Option<(String, Option<String>)> {
         .find(|a| a.procs.iter().any(|p| p.pid == pid))
     {
         return Some((
-            agents::from(agent.kind, &agent.project),
+            agents::base_label(agent.kind, &agent.project),
             agent.session.clone(),
         ));
     }
