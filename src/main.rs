@@ -25,6 +25,8 @@ use ui::{Fold, View};
 
 /// Ports change rarely and resolving owners reads every fd in /proc.
 const PORT_TICKS: u32 = 5;
+/// sysinfo reports cpu as 0 until a second read, which needs this gap.
+const CPU_SETTLE: Duration = Duration::from_millis(200);
 
 struct App {
     sys: System,
@@ -127,16 +129,19 @@ fn run(mut terminal: DefaultTerminal, app: &mut App, view: &mut View) -> io::Res
     // stamped before the refresh so its run time does not stretch the period
     let mut last_tick = Instant::now();
     app.refresh();
+    // the second refresh comes early so cpu shows before a long tick ends
+    let mut period = app.tick.min(CPU_SETTLE);
 
     loop {
-        if last_tick.elapsed() >= app.tick {
+        if last_tick.elapsed() >= period {
             last_tick = Instant::now();
             app.refresh();
+            period = app.tick;
         }
 
         terminal.draw(|frame| ui::draw(frame, app, view))?;
 
-        let timeout = app.tick.saturating_sub(last_tick.elapsed());
+        let timeout = period.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)?
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
