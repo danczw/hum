@@ -79,6 +79,8 @@ pub struct View {
     pub help: bool,
     /// Per-core bars under the gauge line.
     pub cores: bool,
+    /// Every listening port, not only those of agents and orphans.
+    pub all_ports: bool,
     pub theme: Theme,
     pub focus: Focus,
     pub trees: Trees,
@@ -150,6 +152,8 @@ struct Screen<'a> {
 struct PortRow {
     port: u16,
     pid: Option<Pid>,
+    /// Bound beyond loopback; marked `*`.
+    public: bool,
     name: String,
     /// The session or orphan holding the port.
     owner: Option<String>,
@@ -161,6 +165,8 @@ struct Section {
     /// The section's cursor in [`Focus`].
     pane: usize,
     count: usize,
+    /// Rows a filter left out, as `ports: 2/7`; `None` when none were.
+    total: Option<usize>,
     /// Draws the count in the title; `None` keeps it dim like the rest.
     count_style: Option<Style>,
     header: Row<'static>,
@@ -169,7 +175,7 @@ struct Section {
     keys: Vec<Key>,
     widths: Vec<Constraint>,
     /// The rows as short entries for a title line; only ports fold into one.
-    inline: Vec<String>,
+    inline: Vec<Line<'static>>,
 }
 
 pub fn draw(frame: &mut Frame, app: &App, view: &mut View) {
@@ -186,6 +192,7 @@ fn screen(app: &App, cores: bool) -> Screen<'_> {
         .map(|l| PortRow {
             port: l.port,
             pid: l.pid,
+            public: l.public,
             name: l
                 .pid
                 .and_then(|pid| sys.process(pid))
@@ -246,7 +253,7 @@ fn render(frame: &mut Frame, screen: &Screen, view: &mut View) {
         draw_cores(frame, &screen.cores, grid, cores, theme);
     }
 
-    let ports = ports_section(&screen.ports);
+    let ports = ports_section(&screen.ports, view.all_ports, theme);
     if body.width >= WIDE {
         let side = (body.width * 2 / 5).max(SIDE_MIN);
         let [left, right] =
@@ -472,6 +479,7 @@ fn agents_section(agents: &[Agent], trees: &Trees, width: u16, theme: &Theme) ->
         name: "agents",
         pane: focus::AGENTS,
         count: agents.len(),
+        total: None,
         count_style: None,
         header: Row::new(columns(
             [
@@ -523,6 +531,7 @@ fn orphans_section(orphans: &[Orphan], width: u16, theme: &Theme) -> Section {
         name: "orphans",
         pane: focus::ORPHANS,
         count: orphans.len(),
+        total: None,
         count_style: (!orphans.is_empty()).then_some(theme.warn),
         header: Row::new(columns(
             [
@@ -560,12 +569,26 @@ fn columns<T>(columns: [T; 5], cores: bool) -> Vec<T> {
     columns
 }
 
-fn ports_section(ports: &[PortRow]) -> Section {
-    let rows = ports
+/// Only ports of agents and orphans unless `all`. A port bound beyond
+/// loopback gets a `*`, which warns when an agent or orphan owns it.
+fn ports_section(ports: &[PortRow], all: bool, theme: &Theme) -> Section {
+    let shown: Vec<&PortRow> = ports.iter().filter(|p| all || p.owner.is_some()).collect();
+    // `:3000*`
+    let port = |p: &PortRow| {
+        let star = match (p.public, p.owner.is_some()) {
+            (false, _) => None,
+            (true, true) => Some(Span::styled("*", theme.warn)),
+            (true, false) => Some(Span::raw("*")),
+        };
+        let mut spans = vec![Span::raw(format!(":{}", p.port))];
+        spans.extend(star);
+        spans
+    };
+    let rows = shown
         .iter()
         .map(|p| {
             Row::new([
-                Cell::from(format!(":{}", p.port)),
+                Cell::from(Line::from(port(p))),
                 num(p.pid.map_or_else(|| "-".into(), |p| p.to_string())),
                 Cell::from(p.name.clone()),
                 Cell::from(p.owner.clone().unwrap_or_default()),
@@ -575,7 +598,8 @@ fn ports_section(ports: &[PortRow]) -> Section {
     Section {
         name: "ports",
         pane: focus::PORTS,
-        count: ports.len(),
+        count: shown.len(),
+        total: (shown.len() < ports.len()).then_some(ports.len()),
         count_style: None,
         header: Row::new([
             Cell::from("port"),
@@ -584,26 +608,29 @@ fn ports_section(ports: &[PortRow]) -> Section {
             Cell::from("agent"),
         ]),
         rows,
-        keys: ports
+        keys: shown
             .iter()
             .map(|p| (u64::from(p.port), p.pid.map_or(0, |p| p.as_u32().into())))
             .collect(),
         widths: vec![
-            Constraint::Length(6),
+            // `:65535*`
+            Constraint::Length(7),
             PID,
             Constraint::Fill(1),
             Constraint::Fill(2),
         ],
-        // `:3000 node claude/hum`, or `:5432 postgres` without an owner
-        inline: ports
+        // `:3000* node claude/hum`, or `:5432 postgres` without an owner
+        inline: shown
             .iter()
             .map(|p| {
-                [format!(":{}", p.port), p.name.clone()]
-                    .into_iter()
-                    .chain(p.owner.clone())
-                    .filter(|s| !s.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(" ")
+                let mut spans = port(p);
+                spans.extend(
+                    std::iter::once(&p.name)
+                        .chain(&p.owner)
+                        .filter(|s| !s.is_empty())
+                        .map(|s| Span::raw(format!(" {s}"))),
+                );
+                Line::from(spans)
             })
             .collect(),
     }
@@ -760,7 +787,7 @@ fn draw_footer(frame: &mut Frame, section: Section, area: Rect, theme: &Theme, f
     let mut shown = 0;
     for (i, entry) in entries.iter().enumerate() {
         let sep = if i == 0 { " · " } else { "  " };
-        let len = sep.chars().count() + Span::raw(entry).width();
+        let len = sep.chars().count() + entry.width();
         // keep room for `  +N` after this entry
         let rest = entries.len() - i - 1;
         let tail = if rest == 0 {
@@ -774,7 +801,12 @@ fn draw_footer(frame: &mut Frame, section: Section, area: Rect, theme: &Theme, f
         room -= len;
         spans.push(Span::styled(sep, theme.dim));
         // reset: title cells keep the border's dim color
-        spans.push(Span::styled(entry.clone(), Style::reset()));
+        spans.extend(
+            entry
+                .spans
+                .iter()
+                .map(|s| s.clone().style(Style::reset().patch(s.style))),
+        );
         shown += 1;
     }
     if shown < entries.len() {
@@ -801,7 +833,10 @@ fn title(section: &Section, shows: bool, theme: &Theme) -> Vec<Span<'static>> {
         Span::styled(section.name, if shows { theme.accent } else { theme.dim }),
         Span::styled(": ", theme.dim),
         Span::styled(
-            section.count.to_string(),
+            match section.total {
+                Some(total) => format!("{}/{total}", section.count),
+                None => section.count.to_string(),
+            },
             section.count_style.unwrap_or(theme.dim),
         ),
     ]
@@ -819,6 +854,7 @@ fn draw_help(frame: &mut Frame) {
         "h ←      collapse, or go to the root",
         "e c      expand, collapse all trees",
         "1        per-core cpu",
+        "a        all ports, or agent ports only",
         "Esc      close help, hide cursor, else quit",
         "q        quit",
         "?        toggle this help",
@@ -968,7 +1004,7 @@ mod tests {
         (pid, info)
     }
 
-    /// The mockup from #6: three agents, one orphan, two ports.
+    /// The mockup from #6: three agents, one orphan, three ports.
     fn mockup() -> Vec<(Pid, ProcInfo)> {
         vec![
             root_proc(4123, "claude", "/x/hum", 310 << 20),
@@ -1049,14 +1085,23 @@ mod tests {
                 PortRow {
                     port: 3000,
                     pid: Some(Pid::from_u32(9120)),
+                    public: true,
                     name: "node".into(),
                     owner: Some("claude/hum".into()),
                 },
                 PortRow {
                     port: 5432,
                     pid: None,
+                    public: false,
                     name: "postgres".into(),
                     owner: None,
+                },
+                PortRow {
+                    port: 8000,
+                    pid: Some(Pid::from_u32(5871)),
+                    public: false,
+                    name: "python".into(),
+                    owner: Some("claude/infra".into()),
                 },
             ],
         };
@@ -1185,7 +1230,8 @@ mod tests {
         assert!(lines[5].trim_matches(['│', ' ']).is_empty(), "{lines:#?}");
         assert_eq!(lines[6], format!("├ orphans: 1 {}┤", "─".repeat(60)));
         assert!(lines[7].starts_with("│    9120 node "), "{lines:#?}");
-        let ports = "╰ ports: 2 · :3000 node claude/hum  :5432 postgres ";
+        // postgres has no agent and stays hidden
+        let ports = "╰ ports: 2/3 · :3000* node claude/hum  :8000 python claude/infra ";
         assert_eq!(
             lines[8],
             format!("{ports}{}╯", "─".repeat(73 - ports.chars().count()))
@@ -1197,11 +1243,15 @@ mod tests {
         let buf = draw((50, 9), mockup(), Theme::ayu_mirage());
         let last = text(&buf).pop().unwrap();
         assert!(
-            last.starts_with("╰ ports: 2 · :3000 node claude/hum  +1 ─"),
+            last.starts_with("╰ ports: 2/3 · :3000* node claude/hum  +1 ─"),
             "{last}"
         );
-        // entries keep the default color, not the border's
+        // entries keep the default color, not the border's; `*` warns
         assert_eq!(fg_at(&buf, ":3000", 0), Default::default());
+        assert_eq!(
+            fg_at(&buf, ":3000*", 5),
+            Theme::ayu_mirage().warn.fg.unwrap()
+        );
     }
 
     #[test]
@@ -1224,13 +1274,54 @@ mod tests {
         view.focus.cycle(-1);
         view.focus.step(1);
         let buf = draw_view((74, 16), mockup(), &mut view);
-        assert!(selected_line(&buf, &view.theme).unwrap().contains(":5432"));
+        assert!(selected_line(&buf, &view.theme).unwrap().contains(":8000"));
         // folded, focus moves on to agents
         draw_view((74, 9), mockup(), &mut view);
         draw_view((74, 16), mockup(), &mut view);
         view.focus.cycle(-1);
         let buf = draw_view((74, 16), mockup(), &mut view);
-        assert!(selected_line(&buf, &view.theme).unwrap().contains(":5432"));
+        assert!(selected_line(&buf, &view.theme).unwrap().contains(":8000"));
+    }
+
+    #[test]
+    fn a_shows_ports_without_an_agent() {
+        let mut view = View {
+            all_ports: true,
+            ..view()
+        };
+        let buf = draw_view((74, 20), mockup(), &mut view);
+        let lines = text(&buf);
+        assert!(
+            lines.iter().any(|l| l.starts_with("╭ ports: 3 ")),
+            "{lines:#?}"
+        );
+        let postgres = lines.iter().find(|l| l.contains("postgres")).unwrap();
+        assert!(postgres.starts_with("│ :5432 "), "{lines:#?}");
+        // a public port without an agent gets a plain `*`
+        let ports = [PortRow {
+            port: 22,
+            pid: None,
+            public: true,
+            name: "sshd".into(),
+            owner: None,
+        }];
+        let theme = Theme::ayu_mirage();
+        let section = ports_section(&ports, true, &theme);
+        assert_eq!(section.inline[0].spans[1].content, "*");
+        assert_eq!(section.inline[0].spans[1].style, Style::default());
+    }
+
+    #[test]
+    fn filter_hiding_nothing_counts_plainly() {
+        let ports = [PortRow {
+            port: 3000,
+            pid: None,
+            public: true,
+            name: "node".into(),
+            owner: Some("claude/hum".into()),
+        }];
+        let section = ports_section(&ports, false, &Theme::ayu_mirage());
+        assert_eq!((section.count, section.total), (1, None));
     }
 
     #[test]
@@ -1239,7 +1330,7 @@ mod tests {
         let at = lines.iter().position(|l| l.starts_with("├ orphans: 1 "));
         // agents take every row before orphans
         assert_eq!(at, Some(7), "{lines:#?}");
-        assert!(lines[8].starts_with("╰ ports: 2 "), "{lines:#?}");
+        assert!(lines[8].starts_with("╰ ports: 2/3 "), "{lines:#?}");
     }
 
     #[test]
@@ -1259,7 +1350,7 @@ mod tests {
             lines[1].starts_with("╭ agents: 3 ") && lines[1].contains("╮╭ orphans: 1 "),
             "{lines:#?}"
         );
-        assert!(lines[8].contains("╯╰ ports: 2 · :3000 "), "{lines:#?}");
+        assert!(lines[8].contains("╯╰ ports: 2/3 · :3000* "), "{lines:#?}");
     }
 
     #[test]
@@ -1526,6 +1617,7 @@ mod tests {
         View {
             help: false,
             cores: false,
+            all_ports: false,
             theme: Theme::ayu_mirage(),
             focus: Focus::default(),
             trees: Trees::default(),
@@ -1706,10 +1798,10 @@ mod tests {
         let lines = draw_cores_lines((74, 6), vec![0.1; 16]);
         assert!(lines[3].starts_with("╭ agents: 3 "), "{lines:#?}");
         assert!(lines[4].starts_with("├ orphans: 1 "), "{lines:#?}");
-        assert!(lines[5].starts_with("╰ ports: 2 "), "{lines:#?}");
+        assert!(lines[5].starts_with("╰ ports: 2/3 "), "{lines:#?}");
         let lines = draw_cores_lines((148, 6), vec![0.1; 64]);
         assert!(lines[4].starts_with("╭ agents: 3 "), "{lines:#?}");
-        assert!(lines[5].contains("╯╰ ports: 2 "), "{lines:#?}");
+        assert!(lines[5].contains("╯╰ ports: 2/3 "), "{lines:#?}");
     }
 
     #[test]

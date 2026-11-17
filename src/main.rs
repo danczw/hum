@@ -90,6 +90,7 @@ fn main() -> io::Result<()> {
     let mut view = View {
         help: false,
         cores: false,
+        all_ports: false,
         theme: Theme::from_env(),
         focus: Focus::default(),
         trees: Trees::default(),
@@ -140,6 +141,7 @@ fn run(mut terminal: DefaultTerminal, app: &mut App, view: &mut View) -> io::Res
                 KeyCode::Char('e') => view.trees.expand_all(agents),
                 KeyCode::Char('c') => view.trees.collapse_all(),
                 KeyCode::Char('1') => view.cores = !view.cores,
+                KeyCode::Char('a') => view.all_ports = !view.all_ports,
                 _ => {}
             }
         }
