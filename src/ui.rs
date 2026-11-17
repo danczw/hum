@@ -52,6 +52,11 @@ const WIDE: u16 = AGENTS_MIN + SIDE_MIN;
 /// box, see [`stack`].
 const AIRY: u16 = 12;
 
+/// Between the gauges on their line and between columns of core bars.
+const GAP: u16 = 3;
+/// Per-core bars get at least this many cells.
+const CORE_BAR: u16 = 8;
+
 /// Below this size only the gauge line and a hint show.
 const MIN_WIDTH: u16 = 40;
 const MIN_HEIGHT: u16 = 6;
@@ -70,6 +75,8 @@ const DIVIDER: border::Set = border::Set {
 /// What the user toggles while hum runs.
 pub struct View {
     pub help: bool,
+    /// Per-core bars under the gauge line.
+    pub cores: bool,
     pub theme: Theme,
     pub focus: Focus,
     pub trees: Trees,
@@ -128,6 +135,8 @@ impl View {
 struct Screen<'a> {
     /// 0.0 to 1.0.
     cpu: f64,
+    /// Each core's use, 0.0 to 1.0.
+    cores: Vec<f64>,
     /// (used, total) bytes.
     mem: (u64, u64),
     swap: (u64, u64),
@@ -183,6 +192,11 @@ fn screen(app: &App) -> Screen<'_> {
         .collect();
     Screen {
         cpu: f64::from(sys.global_cpu_usage()) / 100.0,
+        cores: sys
+            .cpus()
+            .iter()
+            .map(|c| f64::from(c.usage()) / 100.0)
+            .collect(),
         mem: (sys.used_memory(), sys.total_memory()),
         swap: (sys.used_swap(), sys.total_swap()),
         agents: &app.agents,
@@ -202,14 +216,23 @@ fn render(frame: &mut Frame, screen: &Screen, view: &mut View) {
         frame.render_widget(Line::styled("too small", theme.dim), hint);
         return;
     }
-    let compact = area.height < AIRY;
-    let [gauges, _, body] = Layout::vertical([
+    let grid = CoreGrid::new(screen.cores.len(), area.width);
+    let grid_rows = if view.cores {
+        grid.rows.min(area.height / 2)
+    } else {
+        0
+    };
+    // the sections lay out like a pane as tall as the rows the grid leaves
+    let compact = area.height - grid_rows < AIRY;
+    let [gauges, cores, _, body] = Layout::vertical([
         Constraint::Length(1),
+        Constraint::Length(grid_rows),
         Constraint::Length(u16::from(!compact)),
         Constraint::Fill(1),
     ])
     .areas(area);
     draw_gauges(frame, screen, gauges, theme);
+    draw_cores(frame, &screen.cores, grid, cores, theme);
 
     let ports = ports_section(&screen.ports);
     if body.width >= WIDE {
@@ -248,7 +271,6 @@ fn draw_gauges(frame: &mut Frame, screen: &Screen, area: Rect, theme: &Theme) {
         ("mem", ratio(screen.mem), usage_label(screen.mem), "G"),
         ("swp", ratio(screen.swap), usage_label(screen.swap), "G"),
     ];
-    const GAP: u16 = 3;
     // name, space, bar, space, value, unit
     let text = |(name, _, value, unit): &(&str, f64, String, &str)| {
         name.len() + value.len() + unit.len() + 2
@@ -271,6 +293,92 @@ fn draw_gauges(frame: &mut Frame, screen: &Screen, area: Rect, theme: &Theme) {
             Span::styled(unit, theme.dim),
         ]);
         frame.render_widget(line, area);
+    }
+}
+
+/// How per-core bars pack into a pane's width: as many columns as fit bars
+/// of [`CORE_BAR`] cells, then as few as fill the rows, so no column is
+/// empty. The bars stretch to fill the line.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CoreGrid {
+    cols: u16,
+    rows: u16,
+    /// Bar width in cells.
+    bar: u16,
+    /// Digits of the highest core index.
+    index: u16,
+}
+
+impl CoreGrid {
+    fn new(cores: usize, width: u16) -> Self {
+        let index = cores.saturating_sub(1).to_string().len() as u16;
+        let cores = u16::try_from(cores).unwrap_or(u16::MAX);
+        if cores == 0 {
+            return Self {
+                cols: 0,
+                rows: 0,
+                bar: 0,
+                index,
+            };
+        }
+        // index, space, space, ` 77%`
+        let fixed = index + 2 + 4;
+        let fit = (width + GAP) / (fixed + CORE_BAR + GAP);
+        let rows = cores.div_ceil(fit.clamp(1, cores));
+        let cols = cores.div_ceil(rows);
+        let bar = (width.saturating_sub((cols - 1) * GAP) / cols).saturating_sub(fixed);
+        Self {
+            cols,
+            rows,
+            bar,
+            index,
+        }
+    }
+
+    /// One core's cell: index, space, bar, space, percent.
+    fn cell(&self) -> u16 {
+        self.index + self.bar + 6
+    }
+}
+
+/// ` 5 ⣿⣿⣿⣿⣿⣿⡆⠀⠀  77%` per core, filling down each column first. The bar
+/// takes its load color and the rest stays dim, apart from the gauge line.
+/// When `area` is shorter than the grid, the last cell counts the cores left
+/// out as `+N cores`.
+fn draw_cores(frame: &mut Frame, cores: &[f64], grid: CoreGrid, area: Rect, theme: &Theme) {
+    let rows = usize::from(area.height);
+    if rows == 0 {
+        return;
+    }
+    let slots = rows * usize::from(grid.cols);
+    let shown = if cores.len() > slots {
+        slots - 1
+    } else {
+        cores.len()
+    };
+    let cols: Vec<Rect> =
+        Layout::horizontal(vec![Constraint::Length(grid.cell()); grid.cols.into()])
+            .spacing(GAP)
+            .split(area)
+            .to_vec();
+    let at = |i: usize| Rect {
+        y: area.y + (i % rows) as u16,
+        height: 1,
+        ..cols[i / rows]
+    };
+    for (i, &ratio) in cores.iter().enumerate().take(shown) {
+        let (used, unused) = braille_bar(ratio, grid.bar.into());
+        let line = Line::from(vec![
+            Span::styled(format!("{i:>w$} ", w = usize::from(grid.index)), theme.dim),
+            Span::styled(used, theme.load(ratio)),
+            Span::styled(unused, theme.dim),
+            Span::styled(format!(" {:>3.0}%", ratio * 100.0), theme.dim),
+        ]);
+        frame.render_widget(line, at(i));
+    }
+    if shown < cores.len() {
+        let more = format!("+{} cores", cores.len() - shown);
+        frame.render_widget(Line::styled(more, theme.dim), at(shown));
     }
 }
 
@@ -684,6 +792,7 @@ fn draw_help(frame: &mut Frame) {
         "l →      expand agent tree",
         "h ←      collapse, or go to the root",
         "e c      expand, collapse all trees",
+        "1        per-core cpu",
         "Esc      close help, hide cursor, else quit",
         "q        quit",
         "?        toggle this help",
@@ -862,6 +971,7 @@ mod tests {
     fn draw((width, height): (u16, u16), procs: Vec<(Pid, ProcInfo)>, theme: Theme) -> Buffer {
         let mut view = View {
             help: false,
+            cores: false,
             theme,
             focus: Focus::default(),
             trees: Trees::default(),
@@ -875,9 +985,19 @@ mod tests {
     }
 
     /// Draws with `view`, so its cursor carries over to the next frame.
-    fn draw_view(
+    fn draw_view(size: (u16, u16), procs: Vec<(Pid, ProcInfo)>, view: &mut View) -> Buffer {
+        draw_cores_view(size, procs, eight_cores(), view)
+    }
+
+    /// One core pegged, one at the mid load, the rest low.
+    fn eight_cores() -> Vec<f64> {
+        vec![0.21, 0.06, 1.0, 0.17, 0.0, 0.7, 0.3, 0.12]
+    }
+
+    fn draw_cores_view(
         (width, height): (u16, u16),
         procs: Vec<(Pid, ProcInfo)>,
+        cores: Vec<f64>,
         view: &mut View,
     ) -> Buffer {
         let procs: HashMap<Pid, ProcInfo> = procs.into_iter().collect();
@@ -892,6 +1012,7 @@ mod tests {
         }];
         let screen = Screen {
             cpu: 0.34,
+            cores,
             mem: (GIB * 121 / 10, 31 * GIB),
             swap: (GIB / 1000, 8 * GIB),
             agents: &agents,
@@ -1261,6 +1382,7 @@ mod tests {
         let theme = Theme::ayu_mirage();
         let mut view = View {
             help: false,
+            cores: false,
             theme,
             focus: Focus::default(),
             trees: Trees::default(),
@@ -1283,6 +1405,7 @@ mod tests {
         let theme = Theme::ayu_mirage();
         let mut view = View {
             help: false,
+            cores: false,
             theme,
             focus: Focus::default(),
             trees: Trees::default(),
@@ -1301,6 +1424,7 @@ mod tests {
         for height in [8, 10] {
             let mut view = View {
                 help: false,
+                cores: false,
                 theme,
                 focus: Focus::default(),
                 trees: Trees::default(),
@@ -1328,6 +1452,7 @@ mod tests {
         let theme = Theme::ayu_mirage();
         let mut view = View {
             help: false,
+            cores: false,
             theme,
             focus: Focus::default(),
             trees: Trees::default(),
@@ -1349,6 +1474,7 @@ mod tests {
         let theme = Theme::ayu_mirage();
         let mut view = View {
             help: false,
+            cores: false,
             theme,
             focus: Focus::default(),
             trees: Trees::default(),
@@ -1383,6 +1509,7 @@ mod tests {
     fn view() -> View {
         View {
             help: false,
+            cores: false,
             theme: Theme::ayu_mirage(),
             focus: Focus::default(),
             trees: Trees::default(),
@@ -1480,6 +1607,7 @@ mod tests {
     fn no_color_reverses_the_selected_row() {
         let mut view = View {
             help: false,
+            cores: false,
             theme: Theme::no_color(),
             focus: Focus::default(),
             trees: Trees::default(),
@@ -1493,6 +1621,88 @@ mod tests {
             let cell = &buf[(x, y as u16)];
             assert!(cell.modifier.contains(Modifier::REVERSED), "{x}");
             assert_eq!((cell.fg, cell.bg), Default::default());
+        }
+    }
+
+    fn cores_on() -> View {
+        View {
+            cores: true,
+            ..view()
+        }
+    }
+
+    fn draw_cores_lines(size: (u16, u16), cores: Vec<f64>) -> Vec<String> {
+        text(&draw_cores_view(size, mockup(), cores, &mut cores_on()))
+    }
+
+    #[test]
+    fn one_toggles_a_bar_per_core_down_each_column() {
+        let lines = draw_cores_lines((74, 16), eight_cores());
+        let starts: Vec<_> = lines[1..3]
+            .iter()
+            .map(|l| {
+                l.split_whitespace()
+                    .step_by(3)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect();
+        assert_eq!(starts, ["0 2 4 6", "1 3 5 7"], "{lines:#?}");
+        assert!(lines[2].ends_with(" 12% "), "{lines:#?}");
+        assert_eq!(lines[3].trim(), "");
+        assert!(lines[4].starts_with("╭ agents: 3 "), "{lines:#?}");
+        // off again, the sections move back up under the gauges
+        let off = draw_cores_view((74, 16), mockup(), eight_cores(), &mut view());
+        assert!(text(&off)[2].starts_with("╭ agents: 3 "));
+    }
+
+    #[test]
+    fn core_bars_take_their_load_color_and_the_rest_is_dim() {
+        let theme = Theme::ayu_mirage();
+        let buf = draw_cores_view((74, 16), mockup(), eight_cores(), &mut cores_on());
+        assert_eq!(fg_at(&buf, "2 ⣿", 2), fg(theme.load_high));
+        assert_eq!(fg_at(&buf, "5 ⣿", 2), fg(theme.load_mid));
+        assert_eq!(fg_at(&buf, "7 ⣿", 2), fg(theme.load_low));
+        assert_eq!(fg_at(&buf, "2 ⣿", 0), fg(theme.dim));
+        assert_eq!(fg_at(&buf, "100%", 0), fg(theme.dim));
+    }
+
+    #[test]
+    fn grid_packs_columns_without_an_empty_one() {
+        let grid = CoreGrid::new(32, 148);
+        assert_eq!((grid.cols, grid.rows), (7, 5));
+        assert!(grid.cols * (grid.cell() + GAP) - GAP <= 148);
+        // 9 columns would fit 8 cores, but one row of 8 leaves none empty
+        assert_eq!(CoreGrid::new(8, 200).cols, 8);
+        assert_eq!(CoreGrid::new(8, 200).rows, 1);
+        assert_eq!(CoreGrid::new(0, 74).rows, 0);
+    }
+
+    #[test]
+    fn grid_takes_at_most_half_the_pane_and_counts_the_rest() {
+        let cores = vec![0.1; 64];
+        let lines = draw_cores_lines((74, 9), cores);
+        assert!(lines[1..5].iter().all(|l| l.starts_with(' ')), "{lines:#?}");
+        // 4 rows of 4 columns, the last slot counting 64 - 15
+        assert!(lines[4].contains("   +49 cores"), "{lines:#?}");
+        assert!(lines[5].starts_with("╭ agents: 3 "), "{lines:#?}");
+    }
+
+    #[test]
+    fn tiny_panes_show_no_cores() {
+        let lines = draw_cores_lines((74, 5), eight_cores());
+        assert_eq!(lines[1].trim_end(), "too small");
+    }
+
+    #[test]
+    fn no_color_draws_no_colors_in_the_grid() {
+        let mut view = View {
+            theme: Theme::no_color(),
+            ..cores_on()
+        };
+        let buf = draw_cores_view((74, 16), mockup(), eight_cores(), &mut view);
+        for cell in buf.content() {
+            assert_eq!((cell.fg, cell.bg), Default::default(), "{cell:?}");
         }
     }
 }
