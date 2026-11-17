@@ -19,7 +19,7 @@ cargo run --release
 hum [--interval <secs>] [--agent <name>]...
 ```
 
-- `--interval <secs>`: tick length in seconds, default 1, fractions allowed (`0.5`). Ports refresh every 5 ticks.
+- `--interval <secs>`: tick length in seconds, 0.2 to 3600, default 1, fractions allowed (`0.5`). Ports refresh every 5 ticks.
 - `--agent <name>`: also treat processes named `<name>` as agents, including scripts run by node, bun, deno or python. Repeatable.
 - `-h`, `--help`: print usage. `-V`, `--version`: print the version.
 
