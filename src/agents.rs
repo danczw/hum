@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 
 use sysinfo::{Pid, Process, System};
 
+use crate::focus::{Key, key};
+
 /// Process names that mark the root of an agent session.
 const AGENTS: &[&str] = &[
     "claude",
@@ -294,25 +296,25 @@ impl OrphanTracker {
 pub struct BusyTracker {
     /// (root pid, start time) -> tree cpu per tick, newest last; start time
     /// guards against pid reuse.
-    samples: HashMap<(Pid, u64), VecDeque<f32>>,
+    samples: HashMap<Key, VecDeque<f32>>,
 }
 
 impl BusyTracker {
     pub fn update(&mut self, agents: &mut [Agent]) {
-        let roots: HashSet<(Pid, u64)> = agents
+        let roots: HashSet<Key> = agents
             .iter()
-            .map(|a| (a.procs[0].pid, a.procs[0].start))
+            .map(|a| key(a.procs[0].pid, a.procs[0].start))
             .collect();
         self.samples.retain(|root, _| roots.contains(root));
         for agent in agents {
             let root = &agent.procs[0];
-            let window = self.samples.entry((root.pid, root.start)).or_default();
+            let window = self.samples.entry(key(root.pid, root.start)).or_default();
             if window.len() == BUSY_WINDOW {
                 window.pop_front();
             }
             window.push_back(agent.cpu());
             // cpu is in percent of one core
-            let mean = window.iter().sum::<f32>() / BUSY_WINDOW as f32 / 100.0;
+            let mean = window.iter().sum::<f32>() / window.len() as f32 / 100.0;
             agent.busy = window.len() == BUSY_WINDOW && mean > BUSY_CORES;
         }
     }
