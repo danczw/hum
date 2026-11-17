@@ -173,10 +173,12 @@ struct Section {
 }
 
 pub fn draw(frame: &mut Frame, app: &App, view: &mut View) {
-    render(frame, &screen(app), view);
+    render(frame, &screen(app, view.cores), view);
 }
 
-fn screen(app: &App) -> Screen<'_> {
+/// Reads each core's use only when `cores`, so the grid costs nothing while
+/// it is off.
+fn screen(app: &App, cores: bool) -> Screen<'_> {
     let sys = &app.sys;
     let ports = app
         .ports
@@ -194,11 +196,14 @@ fn screen(app: &App) -> Screen<'_> {
         .collect();
     Screen {
         cpu: f64::from(sys.global_cpu_usage()) / 100.0,
-        cores: sys
-            .cpus()
-            .iter()
-            .map(|c| f64::from(c.usage()) / 100.0)
-            .collect(),
+        cores: if cores {
+            sys.cpus()
+                .iter()
+                .map(|c| f64::from(c.usage()) / 100.0)
+                .collect()
+        } else {
+            Vec::new()
+        },
         mem: (sys.used_memory(), sys.total_memory()),
         swap: (sys.used_swap(), sys.total_swap()),
         agents: &app.agents,
@@ -218,12 +223,10 @@ fn render(frame: &mut Frame, screen: &Screen, view: &mut View) {
         frame.render_widget(Line::styled("too small", theme.dim), hint);
         return;
     }
-    let grid = CoreGrid::new(screen.cores.len(), area.width);
-    let grid_rows = if view.cores {
-        grid.rows.min(area.height / 2)
-    } else {
-        0
-    };
+    let grid = view
+        .cores
+        .then(|| CoreGrid::new(screen.cores.len(), area.width));
+    let grid_rows = grid.map_or(0, |g| g.rows.min(area.height / 2));
     // the sections lay out like a pane as tall as the rows the grid leaves
     let compact = area.height - grid_rows < AIRY;
     let [gauges, cores, _, body] = Layout::vertical([
@@ -234,7 +237,9 @@ fn render(frame: &mut Frame, screen: &Screen, view: &mut View) {
     ])
     .areas(area);
     draw_gauges(frame, screen, gauges, theme);
-    draw_cores(frame, &screen.cores, grid, cores, theme);
+    if let Some(grid) = grid {
+        draw_cores(frame, &screen.cores, grid, cores, theme);
+    }
 
     let ports = ports_section(&screen.ports);
     if body.width >= WIDE {
