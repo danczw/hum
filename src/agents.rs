@@ -163,7 +163,7 @@ pub fn scan(
 }
 
 /// `<kind>/<project>`, the label of a session without its name.
-pub fn from(kind: &str, project: &str) -> String {
+pub fn base_label(kind: &str, project: &str) -> String {
     format!("{kind}/{project}")
 }
 
@@ -527,11 +527,11 @@ impl OrphanTracker {
 
         let mut current = HashSet::new();
         for agent in agents {
-            let from = from(agent.kind, &agent.project);
+            let base = base_label(agent.kind, &agent.project);
             for p in &agent.procs[1..] {
                 current.insert(p.pid);
                 let session = agent.session.clone();
-                self.seen.insert(p.pid, (from.clone(), session, p.start));
+                self.seen.insert(p.pid, (base.clone(), session, p.start));
             }
         }
         // A nested agent whose parent agent exited is now a root, not an orphan.
@@ -621,7 +621,7 @@ impl EnvOrphans {
                 Some(Orphan {
                     pid: p.pid,
                     name: display_name(&p.name, &p.cmd),
-                    from: from(kind, &project),
+                    from: base_label(kind, &project),
                     session,
                     start: p.start,
                     cpu: p.cpu,
@@ -1129,7 +1129,7 @@ mod tests {
         agents.sort_by_key(|a| a.procs[0].pid);
         agents
             .iter()
-            .map(|a| tagged(&from(a.kind, &a.project), a.session.as_deref()))
+            .map(|a| tagged(&base_label(a.kind, &a.project), a.session.as_deref()))
             .collect()
     }
 
