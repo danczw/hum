@@ -1,4 +1,5 @@
 mod agents;
+mod cli;
 mod focus;
 mod ports;
 mod theme;
@@ -7,6 +8,7 @@ mod ui;
 
 use std::io;
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use ratatui::DefaultTerminal;
@@ -14,13 +16,13 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 use agents::{Agent, BusyTracker, EnvOrphans, Orphan, OrphanTracker};
+use cli::Action;
 use focus::Focus;
 use ports::Listener;
 use theme::Theme;
 use trees::Trees;
 use ui::{Fold, View};
 
-const TICK: Duration = Duration::from_secs(1);
 /// Ports change rarely and resolving owners reads every fd in /proc.
 const PORT_TICKS: u32 = 5;
 
@@ -34,20 +36,22 @@ struct App {
     env: EnvOrphans,
     orphans: Vec<Orphan>,
     ports: Vec<Listener>,
+    tick: Duration,
 }
 
 impl App {
-    fn new() -> io::Result<Self> {
+    fn new(tick: Duration) -> io::Result<Self> {
         Ok(Self {
             sys: System::new().map_err(io::Error::other)?,
             home: agents::canonical_home(std::env::var_os("HOME")),
             ticks: 0,
             agents: Vec::new(),
-            busy: BusyTracker::new(agents::busy_window(TICK)),
+            busy: BusyTracker::new(agents::busy_window(tick)),
             tracker: OrphanTracker::default(),
             env: EnvOrphans::new(Pid::from_u32(std::process::id())),
             orphans: Vec::new(),
             ports: Vec::new(),
+            tick,
         })
     }
 
@@ -85,8 +89,25 @@ impl App {
     }
 }
 
-fn main() -> io::Result<()> {
-    let mut app = App::new()?;
+fn main() -> io::Result<ExitCode> {
+    let opts = match cli::parse(std::env::args().skip(1)) {
+        Ok(Action::Run(opts)) => opts,
+        Ok(Action::Help) => {
+            println!("{}", cli::USAGE);
+            return Ok(ExitCode::SUCCESS);
+        }
+        Ok(Action::Version) => {
+            println!("hum {}", env!("CARGO_PKG_VERSION"));
+            return Ok(ExitCode::SUCCESS);
+        }
+        Err(msg) => {
+            eprintln!("hum: {msg}");
+            return Ok(ExitCode::from(2));
+        }
+    };
+    // leaked once; agent kinds are &'static str
+    agents::set_extra(opts.agents.into_iter().map(|a| &*a.leak()).collect());
+    let mut app = App::new(opts.interval)?;
     let mut view = View {
         help: false,
         help_scroll: 0,
@@ -99,7 +120,7 @@ fn main() -> io::Result<()> {
     let terminal = ratatui::init();
     let result = run(terminal, &mut app, &mut view);
     ratatui::restore();
-    result
+    result.map(|()| ExitCode::SUCCESS)
 }
 
 fn run(mut terminal: DefaultTerminal, app: &mut App, view: &mut View) -> io::Result<()> {
@@ -107,14 +128,14 @@ fn run(mut terminal: DefaultTerminal, app: &mut App, view: &mut View) -> io::Res
     let mut last_tick = Instant::now();
 
     loop {
-        if last_tick.elapsed() >= TICK {
+        if last_tick.elapsed() >= app.tick {
             app.refresh();
             last_tick = Instant::now();
         }
 
         terminal.draw(|frame| ui::draw(frame, app, view))?;
 
-        let timeout = TICK.saturating_sub(last_tick.elapsed());
+        let timeout = app.tick.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)?
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
