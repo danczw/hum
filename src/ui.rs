@@ -87,8 +87,8 @@ impl View {
         }
     }
 
-    /// Forgets exited sessions and moves a cursor whose row collapsed away,
-    /// by a key or a new root, to its root.
+    /// Forgets exited sessions and moves a cursor on a hidden child to its
+    /// root, whether a key collapsed the tree or its root changed.
     fn sync(&mut self, agents: &[Agent]) {
         self.trees.retain(agents);
         if let Some(agent) = self
@@ -265,8 +265,8 @@ fn agents_section(agents: &[Agent], trees: &Trees, width: u16, theme: &Theme) ->
         let root = &agent.procs[0];
         let kids = &agent.procs[1..];
         let open = trees.is_open(trees::root(agent));
-        // `▸ claude (14)` collapsed, `▾ claude` open; a cut name keeps the
-        // marker and count
+        // `▸ claude (14)` collapsed, `▾ claude` open; a long kind is cut
+        // before the count
         let (marker, count) = match kids.len() {
             0 => (' ', String::new()),
             _ if open => ('▾', String::new()),
