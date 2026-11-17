@@ -31,6 +31,8 @@ const CPU_SETTLE: Duration = Duration::from_millis(200);
 struct App {
     sys: System,
     home: Option<PathBuf>,
+    /// See [`agents::claude_config`].
+    claude: Option<PathBuf>,
     ticks: u32,
     agents: Vec<Agent>,
     busy: BusyTracker,
@@ -43,9 +45,11 @@ struct App {
 
 impl App {
     fn new(tick: Duration) -> io::Result<Self> {
+        let home = agents::canonical_home(std::env::var_os("HOME"));
         Ok(Self {
             sys: System::new().map_err(io::Error::other)?,
-            home: agents::canonical_home(std::env::var_os("HOME")),
+            claude: agents::claude_config(std::env::var_os("CLAUDE_CONFIG_DIR"), home.as_deref()),
+            home,
             ticks: 0,
             agents: Vec::new(),
             busy: BusyTracker::new(agents::busy_window(tick)),
@@ -76,7 +80,10 @@ impl App {
                 .without_tasks(),
         );
         let procs = agents::snapshot(&self.sys);
-        self.agents = agents::scan(&procs, self.home.as_deref());
+        let claude = self.claude.as_deref();
+        self.agents = agents::scan(&procs, self.home.as_deref(), |pid| {
+            agents::read_session(claude?, pid)
+        });
         self.busy.update(&mut self.agents);
         let home = self.home.as_deref();
         self.orphans = agents::merge(

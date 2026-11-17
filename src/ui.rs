@@ -39,6 +39,9 @@ const AGENTS_FIXED: u16 = 7 + 5 + 7 + 4 + 2 + 2;
 const AGENTS_MIN: u16 = PROCESS + PROJECT + AGENTS_FIXED;
 /// Orphan process names are cut to the width of their `process` header.
 const ORPHAN_NAME: usize = 7;
+/// The orphans box without `from`: pid, name, cores, mem, four gaps, two
+/// borders and a blank column inside each.
+const ORPHANS_FIXED: u16 = 7 + ORPHAN_NAME as u16 + 5 + 7 + 4 + 2 + 2;
 /// Fits a whole orphan row such as `9120 node claude/hum 0.00 48.0M` and
 /// the `process` header. Narrower orphan sections drop cores.
 const SIDE_MIN: u16 = 44;
@@ -446,7 +449,11 @@ fn agents_section(agents: &[Agent], trees: &Trees, width: u16, theme: &Theme) ->
             Row::new(columns(
                 [
                     Cell::from(name),
-                    Cell::from(cut(&agent.project, project_max)),
+                    Cell::from(cut_tagged(
+                        &agent.project,
+                        agent.session.as_deref(),
+                        project_max,
+                    )),
                     num(root.pid.to_string()),
                     num(fmt_cores(agent.cpu())),
                     num(fmt_bytes(agent.mem())),
@@ -513,14 +520,17 @@ fn agents_section(agents: &[Agent], trees: &Trees, width: u16, theme: &Theme) ->
 /// `width` is the whole box.
 fn orphans_section(orphans: &[Orphan], width: u16, theme: &Theme) -> Section {
     let cores = width >= SIDE_MIN;
+    let from_max =
+        usize::from((width + if cores { 0 } else { CORES_SPAN }).saturating_sub(ORPHANS_FIXED));
     let rows = orphans
         .iter()
         .map(|o| {
+            let from = cut_tagged(&o.from, o.session.as_deref(), from_max);
             Row::new(columns(
                 [
                     num(o.pid.to_string()),
                     Cell::from(cut(&o.name, ORPHAN_NAME)),
-                    Cell::from(o.from.clone()).style(Style::reset()),
+                    Cell::from(from).style(Style::reset()),
                     num(fmt_cores(o.cpu)),
                     num(fmt_bytes(o.mem)),
                 ],
@@ -929,6 +939,20 @@ fn cut(text: &str, max: usize) -> String {
     cut
 }
 
+/// `text·session` up to `max` chars. A cut shortens `text` and keeps the
+/// session whole; a session too long for that drops `text` and is cut.
+fn cut_tagged(text: &str, session: Option<&str>, max: usize) -> String {
+    let Some(session) = session else {
+        return cut(text, max);
+    };
+    let tag = format!("·{session}");
+    let room = max.saturating_sub(tag.chars().count());
+    if room == 0 {
+        return cut(&tag, max);
+    }
+    format!("{}{tag}", cut(text, room))
+}
+
 /// Right-aligned, so numbers line up by their last digit.
 fn num(text: String) -> Cell<'static> {
     Cell::from(Line::from(text).alignment(Alignment::Right))
@@ -944,7 +968,7 @@ fn owner(app: &App, pid: Pid) -> Option<String> {
         return Some(agent.label());
     }
     let orphan = app.orphans.iter().find(|o| o.pid == pid)?;
-    Some(format!("orphan:{}", orphan.from))
+    Some(format!("orphan:{}", orphan.label()))
 }
 
 fn ratio((used, total): (u64, u64)) -> f64 {
@@ -1076,7 +1100,7 @@ mod tests {
     }
 
     fn scan(procs: &[(Pid, ProcInfo)]) -> Vec<Agent> {
-        agents::scan(&procs.iter().cloned().collect(), None)
+        agents::scan(&procs.iter().cloned().collect(), None, |_| None)
     }
 
     /// Draws with `view`, so its cursor carries over to the next frame.
@@ -1096,7 +1120,12 @@ mod tests {
         view: &mut View,
     ) -> Buffer {
         let procs: HashMap<Pid, ProcInfo> = procs.into_iter().collect();
-        draw_agents((width, height), &agents::scan(&procs, None), cores, view)
+        draw_agents(
+            (width, height),
+            &agents::scan(&procs, None, |_| None),
+            cores,
+            view,
+        )
     }
 
     fn draw_agents(
@@ -1109,6 +1138,7 @@ mod tests {
             pid: Pid::from_u32(9120),
             name: "node".into(),
             from: "claude/hum".into(),
+            session: None,
             start: 0,
             cpu: 0.0,
             mem: 48 << 20,
@@ -1199,6 +1229,37 @@ mod tests {
     }
 
     #[test]
+    fn cut_tagged_keeps_the_session() {
+        assert_eq!(cut_tagged("hum", None, 9), "hum");
+        assert_eq!(cut_tagged("hum", Some("gate"), 9), "hum·gate");
+        assert_eq!(cut_tagged("dotfiles", Some("gate"), 9), "dot…·gate");
+        assert_eq!(cut_tagged("dotfiles", Some("verylongname"), 9), "·verylon…");
+    }
+
+    #[test]
+    fn sessions_sharing_a_project_show_their_names_in_74x10() {
+        let named = |pid, name: &str| {
+            let (pid, mut info) = root_proc(pid, "claude", "/x/hum", 100 << 20);
+            info.cmd = ["claude", "--name", name]
+                .map(std::ffi::OsString::from)
+                .to_vec();
+            (pid, info)
+        };
+        let procs = vec![
+            named(4123, "gate"),
+            named(4124, "exec"),
+            named(4125, "watch"),
+        ];
+        let lines = draw_lines((74, 10), procs);
+        for label in ["hum·gate", "hum·exec", "hum·watch"] {
+            assert!(
+                lines.iter().any(|l| l.contains(label)),
+                "{label} {lines:#?}"
+            );
+        }
+    }
+
+    #[test]
     fn roles_color_their_rows() {
         let theme = Theme::ayu_mirage();
         let buf = draw((74, 16), mockup(), theme);
@@ -1220,7 +1281,7 @@ mod tests {
         let mut procs = mockup();
         procs[2].1.cpu = 0.0;
         let procs: HashMap<Pid, ProcInfo> = procs.into_iter().collect();
-        let mut agents = agents::scan(&procs, None);
+        let mut agents = agents::scan(&procs, None, |_| None);
         let mut busy = BusyTracker::default();
         for _ in 0..10 {
             busy.update(&mut agents);
