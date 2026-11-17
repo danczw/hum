@@ -849,16 +849,27 @@ fn draw_help(frame: &mut Frame) {
         "PgUp/Dn  move a page",
         "Tab      next section",
         "S-Tab    previous section",
-        "Enter ␣  expand or collapse agent tree",
+        "Enter ␣  toggle agent tree",
         "l →      expand agent tree",
-        "h ←      collapse, or go to the root",
-        "e c      expand, collapse all trees",
+        "h ←      collapse, or go to root",
+        "e c      expand, collapse all",
         "1        per-core cpu",
-        "a        all ports, or agent ports only",
-        "Esc      close help, hide cursor, else quit",
+        "a        all or agent ports",
+        "Esc      close help/cursor, quit",
         "q        quit",
         "?        toggle this help",
     ];
+    let col = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    // too short for one column: two side by side
+    let lines: Vec<String> = if frame.area().height < lines.len() as u16 + 2 {
+        let (left, right) = lines.split_at(lines.len().div_ceil(2));
+        left.iter()
+            .zip(right.iter().chain([&""]))
+            .map(|(l, r)| format!("{l:<col$}  {r}"))
+            .collect()
+    } else {
+        lines.map(String::from).to_vec()
+    };
     let width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) + 4;
     let [area] = Layout::horizontal([Constraint::Length(width as u16)])
         .flex(Flex::Center)
@@ -872,7 +883,7 @@ fn draw_help(frame: &mut Frame) {
         .padding(Padding::horizontal(1));
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(lines.map(Line::from).to_vec()).block(block),
+        Paragraph::new(lines.into_iter().map(Line::from).collect::<Vec<_>>()).block(block),
         area,
     );
 }
@@ -1629,6 +1640,37 @@ mod tests {
 
     fn shows(buf: &Buffer, pid: &str) -> bool {
         text(buf).iter().any(|l| l.contains(pid))
+    }
+
+    #[test]
+    fn help_fits_a_short_pane_in_two_columns() {
+        let mut view = View {
+            help: true,
+            ..view()
+        };
+        for size in [(74, 10), (74, 30)] {
+            let buf = draw_view(size, mockup(), &mut view);
+            let lines = text(&buf);
+            let keys = [
+                "j k ↑ ↓",
+                "g G",
+                "PgUp/Dn",
+                "Tab",
+                "S-Tab",
+                "Enter ␣",
+                "l →",
+                "h ←",
+                "e c",
+                "1        per-core",
+                "a        all",
+                "Esc",
+                "q        quit",
+                "?        toggle",
+            ];
+            for key in keys {
+                assert!(lines.iter().any(|l| l.contains(key)), "{key} {lines:#?}");
+            }
+        }
     }
 
     #[test]
