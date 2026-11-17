@@ -10,7 +10,7 @@ const TCP_LISTEN: u8 = 0x0A;
 pub struct Listener {
     pub port: u16,
     pub pid: Option<Pid>,
-    /// Bound to an address beyond loopback, so other machines may reach it.
+    /// Bound to a non-loopback address, such as 0.0.0.0 or a LAN IP.
     pub public: bool,
 }
 
