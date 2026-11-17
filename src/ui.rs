@@ -412,18 +412,31 @@ fn agents_section(agents: &[Agent], trees: &Trees, width: u16, theme: &Theme) ->
         let kids = &agent.procs[1..];
         let root_key = trees::root(agent);
         let open = trees.is_open(root_key);
-        // `▸ claude (14)` collapsed, `▾ claude` open; a long kind is cut
+        // `▸ ● claude (14)` collapsed, `▾ ● claude` open; a long kind is cut
         // before the count
         let (marker, count) = match kids.len() {
             0 => (' ', String::new()),
             _ if open => ('▾', String::new()),
             n => ('▸', format!(" ({n})")),
         };
-        let kind = cut(agent.kind, process_max.saturating_sub(2 + count.len()));
+        let (status, status_style) = match agent.busy {
+            true => ('●', theme.accent),
+            false => ('○', theme.dim),
+        };
+        let kind = cut(agent.kind, process_max.saturating_sub(4 + count.len()));
+        let name = cut(&format!("{marker} {status} {kind}{count}"), process_max);
+        let mut chars = name.chars();
+        let fold: String = chars.by_ref().take(2).collect();
+        let status: String = chars.by_ref().take(1).collect();
+        let name = Line::from(vec![
+            Span::raw(fold),
+            Span::styled(status, status_style),
+            Span::raw(chars.collect::<String>()),
+        ]);
         rows.push(
             Row::new(columns(
                 [
-                    Cell::from(cut(&format!("{marker} {kind}{count}"), process_max)),
+                    Cell::from(name),
                     Cell::from(cut(&agent.project, project_max)),
                     num(root.pid.to_string()),
                     num(fmt_cores(agent.cpu())),
@@ -930,7 +943,7 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::style::{Color, Modifier};
 
-    use crate::agents::{self, ProcInfo};
+    use crate::agents::{self, BusyTracker, ProcInfo};
     use crate::focus::Focus;
 
     const GIB: u64 = 1024 * 1024 * 1024;
@@ -1008,7 +1021,15 @@ mod tests {
         view: &mut View,
     ) -> Buffer {
         let procs: HashMap<Pid, ProcInfo> = procs.into_iter().collect();
-        let agents = agents::scan(&procs, None);
+        draw_agents((width, height), &agents::scan(&procs, None), cores, view)
+    }
+
+    fn draw_agents(
+        (width, height): (u16, u16),
+        agents: &[Agent],
+        cores: Vec<f64>,
+        view: &mut View,
+    ) -> Buffer {
         let orphans = [Orphan {
             pid: Pid::from_u32(9120),
             name: "node".into(),
@@ -1022,7 +1043,7 @@ mod tests {
             cores,
             mem: (GIB * 121 / 10, 31 * GIB),
             swap: (GIB / 1000, 8 * GIB),
-            agents: &agents,
+            agents,
             orphans: &orphans,
             ports: vec![
                 PortRow {
@@ -1098,7 +1119,8 @@ mod tests {
         let theme = Theme::ayu_mirage();
         let buf = draw((74, 16), mockup(), theme);
         assert_eq!(fg_at(&buf, "agents: 3", 0), fg(theme.dim));
-        assert_eq!(fg_at(&buf, "│   claude", 4), fg(theme.accent));
+        assert_eq!(fg_at(&buf, "│   ○ claude", 6), fg(theme.accent));
+        assert_eq!(fg_at(&buf, "│   ○ claude", 4), fg(theme.dim));
         assert_eq!(fg_at(&buf, "orphans: 1", 0), fg(theme.dim));
         assert_eq!(fg_at(&buf, "orphans: 1", 9), fg(theme.warn));
         // the orphan row warns but its agent tag does not
@@ -1106,6 +1128,23 @@ mod tests {
         assert_eq!(fg_at(&buf, "node    claude/hum", 8), Default::default());
         // ports carry no role
         assert_eq!(fg_at(&buf, ":3000", 0), Default::default());
+    }
+
+    #[test]
+    fn busy_sessions_mark_their_root_in_accent() {
+        let theme = Theme::ayu_mirage();
+        let mut procs = mockup();
+        procs[2].1.cpu = 0.0;
+        let procs: HashMap<Pid, ProcInfo> = procs.into_iter().collect();
+        let mut agents = agents::scan(&procs, None);
+        let mut busy = BusyTracker::default();
+        for _ in 0..10 {
+            busy.update(&mut agents);
+        }
+        let mut view = View { theme, ..view() };
+        let buf = draw_agents((74, 16), &agents, eight_cores(), &mut view);
+        assert_eq!(fg_at(&buf, "│   ● claude", 4), fg(theme.accent));
+        assert_eq!(fg_at(&buf, "│   ○ codex", 4), fg(theme.dim));
     }
 
     #[test]
@@ -1137,7 +1176,7 @@ mod tests {
         assert_eq!(lines[1], format!("╭ agents: 3 {}╮", "─".repeat(61)));
         for (line, pid) in lines[2..5].iter().zip(["4123", "5871", "6002"]) {
             assert!(
-                line.starts_with("│   c") && line.contains(pid),
+                line.starts_with("│   ○ c") && line.contains(pid),
                 "{lines:#?}"
             );
             assert!(line.ends_with("M │"), "{lines:#?}");
@@ -1289,7 +1328,7 @@ mod tests {
                 .join(" ")
         };
         assert_eq!(words(&lines[3]), "process project pid cores mem");
-        assert!(lines[4].starts_with("│   claude"), "{}", lines[4]);
+        assert!(lines[4].starts_with("│   ○ claude"), "{}", lines[4]);
     }
 
     #[test]
@@ -1362,7 +1401,7 @@ mod tests {
     #[test]
     fn narrow_panes_cut_project_before_process() {
         let lines = draw_lines((40, 16), mockup());
-        assert!(lines[4].starts_with("│   claude "), "{lines:#?}");
+        assert!(lines[4].starts_with("│   ○ claude "), "{lines:#?}");
     }
 
     #[test]
@@ -1380,7 +1419,7 @@ mod tests {
                 .ok()
         });
         assert!(lines[3].starts_with("│ process"), "{lines:#?}");
-        assert!(lines[4].starts_with("│ ▾ claude"), "{lines:#?}");
+        assert!(lines[4].starts_with("│ ▾ ○ claude"), "{lines:#?}");
         assert_eq!(Some(29 - shown), more, "{lines:#?}");
     }
 
@@ -1501,10 +1540,10 @@ mod tests {
     fn trees_start_collapsed_with_their_size() {
         let buf = draw_view((74, 16), sessions(), &mut view());
         let lines = text(&buf);
-        assert!(lines[4].starts_with("│ ▸ claude (2) "), "{lines:#?}");
-        assert!(lines[5].starts_with("│ ▸ claude (1) "), "{lines:#?}");
+        assert!(lines[4].starts_with("│ ▸ ○ claude (2) "), "{lines:#?}");
+        assert!(lines[5].starts_with("│ ▸ ○ claude (1) "), "{lines:#?}");
         // a session without children has nothing to expand
-        assert!(lines[6].starts_with("│   codex "), "{lines:#?}");
+        assert!(lines[6].starts_with("│   ○ codex "), "{lines:#?}");
         assert!(!shows(&buf, "4124") && !shows(&buf, "5872"));
     }
 
@@ -1525,7 +1564,7 @@ mod tests {
         view.fold(&agents, Fold::Expand);
         let buf = draw_view((74, 16), sessions(), &mut view);
         assert!(
-            text(&buf)[4].starts_with("│ ▾ claude "),
+            text(&buf)[4].starts_with("│ ▾ ○ claude "),
             "{:#?}",
             text(&buf)
         );

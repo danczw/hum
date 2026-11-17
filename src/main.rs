@@ -13,7 +13,7 @@ use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
-use agents::{Agent, Orphan, OrphanTracker};
+use agents::{Agent, BusyTracker, Orphan, OrphanTracker};
 use focus::Focus;
 use ports::Listener;
 use theme::Theme;
@@ -29,6 +29,7 @@ struct App {
     home: Option<PathBuf>,
     ticks: u32,
     agents: Vec<Agent>,
+    busy: BusyTracker,
     tracker: OrphanTracker,
     orphans: Vec<Orphan>,
     ports: Vec<Listener>,
@@ -41,6 +42,7 @@ impl App {
             home: agents::canonical_home(std::env::var_os("HOME")),
             ticks: 0,
             agents: Vec::new(),
+            busy: BusyTracker::default(),
             tracker: OrphanTracker::default(),
             orphans: Vec::new(),
             ports: Vec::new(),
@@ -67,6 +69,7 @@ impl App {
         );
         let procs = agents::snapshot(&self.sys);
         self.agents = agents::scan(&procs, self.home.as_deref());
+        self.busy.update(&mut self.agents);
         self.orphans = self.tracker.update(&procs, &self.agents);
         if self.ticks.is_multiple_of(PORT_TICKS) {
             self.ports = ports::listening(&self.sys);

@@ -87,6 +87,7 @@ mod tests {
                 kind: "claude",
                 project: String::new(),
                 procs: vec![proc(pid, 0), proc(pid + 1, 1)],
+                busy: false,
             })
             .collect()
     }
