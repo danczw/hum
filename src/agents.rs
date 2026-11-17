@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use sysinfo::{Pid, Process, System};
@@ -20,6 +21,10 @@ const AGENTS: &[&str] = &[
 /// Interpreters that may run an agent as a script, e.g. `node /usr/bin/codex`.
 /// Version suffixes are ignored, so `python3.12` counts as `python`.
 const RUNTIMES: &[&str] = &["node", "bun", "deno", "python"];
+
+/// Env vars an agent sets in every process it spawns, holding the agent's
+/// pid, by agent kind. Add one only once verified on a real session.
+const MARKERS: &[(&str, &str)] = &[("claude", "CLAUDE_PID")];
 
 /// Ticks of tree cpu averaged to call a session busy; one tick a second.
 const BUSY_WINDOW: usize = 5;
@@ -243,7 +248,8 @@ pub struct Orphan {
 }
 
 /// Remembers which processes agents spawned, to spot the ones left behind.
-/// Only catches orphans whose agent tree changed while hum was running.
+/// Only catches orphans whose agent tree changed while hum was running, so
+/// it covers agents without a [`MARKERS`] entry.
 #[derive(Default)]
 pub struct OrphanTracker {
     /// pid -> (spawning session's label, start time); start time guards
@@ -289,6 +295,92 @@ impl OrphanTracker {
         orphans.sort_by_key(|o| o.pid);
         orphans
     }
+}
+
+/// Finds orphans by the [`MARKERS`] their agent left in their environment,
+/// including ones from before hum started.
+pub struct EnvOrphans {
+    /// hum itself inherits the markers when started from an agent's shell.
+    me: Pid,
+    /// (pid, start time) -> marker; None when unmarked or unreadable. The
+    /// environment is fixed at exec, so each process is read once.
+    markers: HashMap<Key, Option<(&'static str, Pid)>>,
+}
+
+impl EnvOrphans {
+    pub fn new(me: Pid) -> Self {
+        Self {
+            me,
+            markers: HashMap::new(),
+        }
+    }
+
+    /// Lists marked processes outside every agent tree. `read` returns a
+    /// pid's raw environ, see [`read_environ`].
+    pub fn update(
+        &mut self,
+        procs: &HashMap<Pid, ProcInfo>,
+        agents: &[Agent],
+        home: Option<&Path>,
+        mut read: impl FnMut(Pid) -> Option<Vec<u8>>,
+    ) -> Vec<Orphan> {
+        let alive: HashSet<Key> = procs.values().map(|p| key(p.pid, p.start)).collect();
+        self.markers.retain(|k, _| alive.contains(k));
+
+        let tracked: HashSet<Pid> = agents
+            .iter()
+            .flat_map(|a| a.procs.iter().map(|p| p.pid))
+            .collect();
+        let mut orphans: Vec<Orphan> = procs
+            .values()
+            .filter(|p| p.pid != self.me && !tracked.contains(&p.pid))
+            .filter_map(|p| {
+                let (kind, agent) = *self
+                    .markers
+                    .entry(key(p.pid, p.start))
+                    .or_insert_with(|| marker(&read(p.pid)?))
+                    .as_ref()?;
+                // A reused pid is younger than the processes it marks.
+                let project = procs
+                    .get(&agent)
+                    .filter(|a| a.start <= p.start && agent_kind(&a.name, &a.cmd) == Some(kind))
+                    .map_or_else(|| "?".into(), |a| project(a.cwd.as_deref(), home));
+                Some(Orphan {
+                    pid: p.pid,
+                    name: display_name(&p.name, &p.cmd),
+                    from: format!("{kind}/{project}"),
+                    start: p.start,
+                    cpu: p.cpu,
+                    mem: p.mem,
+                })
+            })
+            .collect();
+        orphans.sort_by_key(|o| o.pid);
+        orphans
+    }
+}
+
+pub fn read_environ(pid: Pid) -> Option<Vec<u8>> {
+    fs::read(format!("/proc/{pid}/environ")).ok()
+}
+
+/// The first [`MARKERS`] entry set in a raw `/proc/<pid>/environ`.
+fn marker(environ: &[u8]) -> Option<(&'static str, Pid)> {
+    environ.split(|&b| b == 0).find_map(|var| {
+        let var = std::str::from_utf8(var).ok()?;
+        let (name, value) = var.split_once('=')?;
+        let &(kind, _) = MARKERS.iter().find(|(_, m)| *m == name)?;
+        Some((kind, Pid::from_u32(value.parse().ok()?)))
+    })
+}
+
+/// Joins both orphan lists by pid. The tracker's entry wins: it keeps the
+/// project after the agent exits.
+pub fn merge(mut tracked: Vec<Orphan>, env: Vec<Orphan>) -> Vec<Orphan> {
+    let seen: HashSet<Pid> = tracked.iter().map(|o| o.pid).collect();
+    tracked.extend(env.into_iter().filter(|o| !seen.contains(&o.pid)));
+    tracked.sort_by_key(|o| o.pid);
+    tracked
 }
 
 /// Remembers each session's recent tree cpu to tell busy from idle.
@@ -501,6 +593,132 @@ mod tests {
         let agents = scan(&procs, home());
         assert_eq!(agents[0].procs[0].pid.as_u32(), 12);
         assert_eq!(pids(&tracker.update(&procs, &agents)), [11]);
+    }
+
+    fn environ(vars: &[&str]) -> Vec<u8> {
+        vars.join("\0").into_bytes()
+    }
+
+    /// Env orphans when `marked` pids carry `CLAUDE_PID=agent`; hum runs as
+    /// pid 99.
+    fn env_orphans(procs: &HashMap<Pid, ProcInfo>, marked: &[u32], agent: u32) -> Vec<Orphan> {
+        let mut env = EnvOrphans::new(Pid::from_u32(99));
+        let read = |pid: Pid| {
+            let var = format!("CLAUDE_PID={agent}");
+            marked
+                .contains(&pid.as_u32())
+                .then(|| environ(&["PATH=/bin", &var]))
+        };
+        env.update(procs, &scan(procs, home()), home(), read)
+    }
+
+    #[test]
+    fn marker_names_agent_pid() {
+        let pid = Some(("claude", Pid::from_u32(965)));
+        assert_eq!(marker(&environ(&["A=1", "CLAUDE_PID=965", "B=2"])), pid);
+        assert_eq!(marker(&environ(&["CLAUDECODE=1"])), None);
+        assert_eq!(marker(&environ(&["CLAUDE_PID=x"])), None);
+        assert_eq!(marker(b""), None);
+    }
+
+    #[test]
+    fn marked_process_outside_tree_is_orphan() {
+        let procs = HashMap::from([
+            in_dir(proc(10, 1, 100, "claude"), "/home/u/code/a"),
+            proc(11, 1, 101, "tail"),
+        ]);
+        let orphans = env_orphans(&procs, &[11], 10);
+        assert_eq!(pids(&orphans), [11]);
+        assert_eq!(orphans[0].from, "claude/a");
+    }
+
+    #[test]
+    fn marked_process_of_closed_session_is_unknown() {
+        let procs = HashMap::from([proc(11, 1, 101, "tail")]);
+        assert_eq!(env_orphans(&procs, &[11], 10)[0].from, "claude/?");
+    }
+
+    #[test]
+    fn reused_agent_pid_does_not_name_project() {
+        // pid 10 now runs something else, or a claude started later
+        for procs in [
+            HashMap::from([
+                in_dir(proc(10, 1, 100, "bash"), "/a"),
+                proc(11, 1, 101, "tail"),
+            ]),
+            HashMap::from([
+                in_dir(proc(10, 1, 200, "claude"), "/a"),
+                proc(11, 1, 101, "tail"),
+            ]),
+        ] {
+            assert_eq!(env_orphans(&procs, &[11], 10)[0].from, "claude/?");
+        }
+    }
+
+    #[test]
+    fn marked_hum_tree_and_roots_are_not_orphans() {
+        let procs = HashMap::from([
+            proc(10, 1, 100, "claude"),
+            proc(11, 10, 101, "bash"),
+            proc(20, 1, 200, "claude"),
+            proc(99, 11, 199, "hum"),
+        ]);
+        assert!(env_orphans(&procs, &[11, 20, 99], 10).is_empty());
+    }
+
+    #[test]
+    fn unmarked_processes_are_not_orphans() {
+        let procs = HashMap::from([proc(11, 1, 101, "tail")]);
+        assert!(env_orphans(&procs, &[], 10).is_empty());
+    }
+
+    #[test]
+    fn environ_read_once_per_process() {
+        let mut env = EnvOrphans::new(Pid::from_u32(99));
+        let mut reads = Vec::new();
+        let mut tick = |env: &mut EnvOrphans, procs: &HashMap<Pid, ProcInfo>| {
+            let agents = scan(procs, home());
+            env.update(procs, &agents, home(), |pid| {
+                reads.push(pid.as_u32());
+                // 12 is another user's process
+                (pid.as_u32() != 12).then(|| environ(&["CLAUDE_PID=10"]))
+            });
+        };
+        let procs = HashMap::from([
+            proc(10, 1, 100, "claude"),
+            proc(11, 10, 101, "bash"),
+            proc(12, 1, 102, "sshd"),
+        ]);
+        tick(&mut env, &procs);
+        tick(&mut env, &procs);
+        // 11 leaves the tree, 12 is a new process on a reused pid
+        let procs = HashMap::from([proc(11, 1, 101, "bash"), proc(12, 1, 500, "tail")]);
+        tick(&mut env, &procs);
+        tick(&mut env, &procs);
+        reads.sort_unstable();
+        assert_eq!(reads, [11, 12, 12]);
+    }
+
+    #[test]
+    fn tracked_orphan_wins_merge() {
+        let orphan = |pid: u32, from: &str| Orphan {
+            pid: Pid::from_u32(pid),
+            name: "tail".into(),
+            from: from.into(),
+            start: 0,
+            cpu: 0.0,
+            mem: 0,
+        };
+        let merged = merge(
+            vec![orphan(20, "claude/a")],
+            vec![
+                orphan(30, "claude/?"),
+                orphan(20, "claude/?"),
+                orphan(10, "claude/?"),
+            ],
+        );
+        assert_eq!(pids(&merged), [10, 20, 30]);
+        assert_eq!(merged[1].from, "claude/a");
     }
 
     /// One claude session at `pid` whose tree uses `cores`.

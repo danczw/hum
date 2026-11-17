@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
-use agents::{Agent, BusyTracker, Orphan, OrphanTracker};
+use agents::{Agent, BusyTracker, EnvOrphans, Orphan, OrphanTracker};
 use focus::Focus;
 use ports::Listener;
 use theme::Theme;
@@ -31,6 +31,7 @@ struct App {
     agents: Vec<Agent>,
     busy: BusyTracker,
     tracker: OrphanTracker,
+    env: EnvOrphans,
     orphans: Vec<Orphan>,
     ports: Vec<Listener>,
 }
@@ -44,6 +45,7 @@ impl App {
             agents: Vec::new(),
             busy: BusyTracker::default(),
             tracker: OrphanTracker::default(),
+            env: EnvOrphans::new(Pid::from_u32(std::process::id())),
             orphans: Vec::new(),
             ports: Vec::new(),
         })
@@ -70,7 +72,12 @@ impl App {
         let procs = agents::snapshot(&self.sys);
         self.agents = agents::scan(&procs, self.home.as_deref());
         self.busy.update(&mut self.agents);
-        self.orphans = self.tracker.update(&procs, &self.agents);
+        let home = self.home.as_deref();
+        self.orphans = agents::merge(
+            self.tracker.update(&procs, &self.agents),
+            self.env
+                .update(&procs, &self.agents, home, agents::read_environ),
+        );
         if self.ticks.is_multiple_of(PORT_TICKS) {
             self.ports = ports::listening(&self.sys);
         }
