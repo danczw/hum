@@ -480,8 +480,8 @@ fn ports_section(ports: &[PortRow]) -> Section {
 /// the earlier sections first. Rows nobody needs are shared out so the
 /// boxes fill the area.
 ///
-/// Each section is a box, and a header only shows with at least one row
-/// under it. `compact`, the sections share one box split by `├ name ─┤`
+/// Each section is a box, and a header shows over at least one row or in
+/// an empty section. `compact`, the sections share one box split by `├ name ─┤`
 /// lines, drop their headers, and ports fold into the bottom border.
 fn stack<const N: usize>(
     frame: &mut Frame,
