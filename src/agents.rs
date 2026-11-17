@@ -183,7 +183,7 @@ fn tagged(base: &str, session: Option<&str>) -> String {
 /// First hit wins: a name the user or Claude Code gave in the session
 /// file, `--name` in argv, the file's derived name without its leading
 /// `<project>-`, then the 1-based rank by start time in the group. Names
-/// taken twice in a group fall back to the rank too.
+/// taken twice in a group, or equal to a rank, fall back to the rank too.
 fn name_sessions(
     procs: &HashMap<Pid, ProcInfo>,
     agents: &mut [Agent],
@@ -625,7 +625,6 @@ impl EnvOrphans {
                     .get(&agent)
                     .filter(|a| a.start <= p.start && agent_kind(&a.name, &a.cmd) == Some(kind));
                 let project = agent.map_or_else(|| "?".into(), |a| project(a.cwd.as_deref(), home));
-                // A root agent knows its session name.
                 let session = agent
                     .and_then(|a| agents.iter().find(|r| r.procs[0].pid == a.pid))
                     .and_then(|r| r.session.clone());
