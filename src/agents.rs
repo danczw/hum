@@ -97,12 +97,19 @@ pub struct Agent {
     pub procs: Vec<Proc>,
     /// Set by [`BusyTracker::update`]; false until a window of samples exists.
     pub busy: bool,
+    /// Tells apart agents of the same kind and project, see [`name_sessions`];
+    /// None when the agent is the only one.
+    pub session: Option<String>,
 }
 
 impl Agent {
-    /// The session as `<kind>/<project>`, e.g. `claude/hum`.
+    /// The session as `<kind>/<project>`, e.g. `claude/hum`, or
+    /// `claude/hum·gate` when it shares the project.
     pub fn label(&self) -> String {
-        format!("{}/{}", self.kind, self.project)
+        tagged(
+            &format!("{}/{}", self.kind, self.project),
+            self.session.as_deref(),
+        )
     }
 
     pub fn cpu(&self) -> f32 {
@@ -114,7 +121,13 @@ impl Agent {
     }
 }
 
-pub fn scan(procs: &HashMap<Pid, ProcInfo>, home: Option<&Path>) -> Vec<Agent> {
+/// `read_session` returns a claude pid's raw session file, see
+/// [`read_session`].
+pub fn scan(
+    procs: &HashMap<Pid, ProcInfo>,
+    home: Option<&Path>,
+    read_session: impl FnMut(Pid) -> Option<String>,
+) -> Vec<Agent> {
     let mut children: HashMap<Pid, Vec<Pid>> = HashMap::new();
     for p in procs.values() {
         if let Some(parent) = p.parent {
@@ -144,9 +157,11 @@ pub fn scan(procs: &HashMap<Pid, ProcInfo>, home: Option<&Path>) -> Vec<Agent> {
                 project: project(procs[&pid].cwd.as_deref(), home),
                 procs: tree,
                 busy: false,
+                session: None,
             }
         })
         .collect();
+    name_sessions(procs, &mut agents, read_session);
     // busiest first; pid keeps idle sessions in a steady order
     agents.sort_by(|a, b| {
         b.cpu()
@@ -154,6 +169,204 @@ pub fn scan(procs: &HashMap<Pid, ProcInfo>, home: Option<&Path>) -> Vec<Agent> {
             .then(a.procs[0].pid.cmp(&b.procs[0].pid))
     });
     agents
+}
+
+/// `<base>·<session>`, or `base` alone without a session.
+fn tagged(base: &str, session: Option<&str>) -> String {
+    match session {
+        Some(s) => format!("{base}·{s}"),
+        None => base.to_string(),
+    }
+}
+
+/// Names each agent that shares its kind and project with another one.
+/// First hit wins: a name the user or Claude Code gave in the session
+/// file, `--name` in argv, the file's derived name without its leading
+/// `<project>-`, then the 1-based rank by start time in the group. Names
+/// taken twice in a group fall back to the rank too.
+fn name_sessions(
+    procs: &HashMap<Pid, ProcInfo>,
+    agents: &mut [Agent],
+    mut read_session: impl FnMut(Pid) -> Option<String>,
+) {
+    let mut groups: HashMap<(&str, String), Vec<usize>> = HashMap::new();
+    for (i, a) in agents.iter().enumerate() {
+        groups
+            .entry((a.kind, a.project.clone()))
+            .or_default()
+            .push(i);
+    }
+    for mut group in groups.into_values().filter(|g| g.len() > 1) {
+        group.sort_by_key(|&i| (agents[i].procs[0].start, agents[i].procs[0].pid));
+        let names: Vec<Option<String>> = group
+            .iter()
+            .map(|&i| {
+                let agent = &agents[i];
+                let info = &procs[&agent.procs[0].pid];
+                let file = (agent.kind == "claude")
+                    .then(|| read_session(info.pid))
+                    .flatten()
+                    .filter(|f| {
+                        let cwd = top_level_str(f, "cwd");
+                        cwd.is_some() && cwd.as_deref().map(Path::new) == info.cwd.as_deref()
+                    });
+                let file_name = |sources: &[&str]| {
+                    let file = file.as_deref()?;
+                    let source = top_level_str(file, "nameSource")?;
+                    sources
+                        .contains(&source.as_str())
+                        .then(|| top_level_str(file, "name"))?
+                        .filter(|n| !n.is_empty())
+                };
+                file_name(&["user", "auto"])
+                    .or_else(|| argv_name(&info.cmd))
+                    .or_else(|| {
+                        let name = file_name(&["derived"])?;
+                        let prefix = format!("{}-", agent.project);
+                        Some(name.strip_prefix(&prefix).unwrap_or(&name).to_string())
+                    })
+                    .filter(|n| !n.is_empty())
+            })
+            .collect();
+        let ranks = 1..=group.len();
+        // A name like `2` could match another agent's rank.
+        let taken = |n: &String| {
+            names.iter().filter(|m| m.as_ref() == Some(n)).count() > 1
+                || n.parse().is_ok_and(|r| ranks.contains(&r))
+        };
+        for (rank, (&i, name)) in group.iter().zip(&names).enumerate() {
+            agents[i].session = Some(match name {
+                Some(n) if !taken(n) => n.clone(),
+                _ => (rank + 1).to_string(),
+            });
+        }
+    }
+}
+
+/// The value of `--name <n>` or `--name=<n>` in argv.
+fn argv_name(cmd: &[OsString]) -> Option<String> {
+    let mut args = cmd.iter().skip(1).filter_map(|a| a.to_str());
+    while let Some(arg) = args.next() {
+        if arg == "--name" {
+            return args.next().map(str::to_string);
+        }
+        if let Some(name) = arg.strip_prefix("--name=") {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+/// Claude Code's file for a running session, under `$CLAUDE_CONFIG_DIR` or
+/// `~/.claude`. Its format is internal and may change, so readers treat
+/// every field as optional. None when the file is from an earlier process
+/// on the same pid, see [`same_process`].
+pub fn read_session(config: &Path, pid: Pid) -> Option<String> {
+    let file = fs::read_to_string(config.join("sessions").join(format!("{pid}.json"))).ok()?;
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    same_process(&file, &stat).then_some(file)
+}
+
+/// False when the file's `procStart` differs from the start time in clock
+/// ticks in `/proc/<pid>/stat`, i.e. the file outlived its process and the
+/// pid was reused. Its `startedAt` is no guard: on a live session it read
+/// 223s after the process start. Files without `procStart` pass.
+fn same_process(file: &str, stat: &str) -> bool {
+    let Some(start) = top_level_str(file, "procStart") else {
+        return true;
+    };
+    // starttime is field 22; fields 3 on follow the `)` that ends the comm
+    stat.rsplit_once(')')
+        .and_then(|(_, rest)| rest.split_whitespace().nth(19))
+        .is_some_and(|ticks| ticks == start)
+}
+
+/// Where [`read_session`] looks, from `$CLAUDE_CONFIG_DIR` and `$HOME`.
+pub fn claude_config(config_dir: Option<OsString>, home: Option<&Path>) -> Option<PathBuf> {
+    config_dir
+        .map(PathBuf::from)
+        .or_else(|| Some(home?.join(".claude")))
+}
+
+/// The string value of `key` in a JSON object's top level, skipping nested
+/// objects and arrays. None when the key is missing, not a string, or the
+/// JSON does not parse up to it.
+fn top_level_str(json: &str, key: &str) -> Option<String> {
+    let mut chars = json.chars().peekable();
+    let skip_ws = |chars: &mut Chars| while chars.next_if(|c| c.is_whitespace()).is_some() {};
+    skip_ws(&mut chars);
+    chars.next_if_eq(&'{')?;
+    loop {
+        skip_ws(&mut chars);
+        let k = json_string(&mut chars)?;
+        skip_ws(&mut chars);
+        chars.next_if_eq(&':')?;
+        skip_ws(&mut chars);
+        if chars.peek() == Some(&'"') {
+            let value = json_string(&mut chars)?;
+            if k == key {
+                return Some(value);
+            }
+        } else {
+            if k == key {
+                return None;
+            }
+            skip_json_value(&mut chars)?;
+        }
+        skip_ws(&mut chars);
+        chars.next_if_eq(&',')?;
+    }
+}
+
+type Chars<'a> = std::iter::Peekable<std::str::Chars<'a>>;
+
+/// Reads a JSON string, quotes included, and returns it unescaped.
+fn json_string(chars: &mut Chars) -> Option<String> {
+    chars.next_if_eq(&'"')?;
+    let mut out = String::new();
+    loop {
+        match chars.next()? {
+            '"' => return Some(out),
+            '\\' => out.push(match chars.next()? {
+                'n' => '\n',
+                't' => '\t',
+                'r' => '\r',
+                'b' => '\u{8}',
+                'f' => '\u{c}',
+                'u' => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    char::from_u32(u32::from_str_radix(&hex, 16).ok()?).unwrap_or('\u{fffd}')
+                }
+                c => c,
+            }),
+            c => out.push(c),
+        }
+    }
+}
+
+/// Skips a non-string JSON value, nested objects and arrays included, up to
+/// the `,` or `}` after it.
+fn skip_json_value(chars: &mut Chars) -> Option<()> {
+    let mut depth = 0usize;
+    loop {
+        match *chars.peek()? {
+            '"' => {
+                json_string(chars)?;
+            }
+            '{' | '[' => {
+                depth += 1;
+                chars.next();
+            }
+            ',' | '}' | ']' if depth == 0 => return Some(()),
+            '}' | ']' => {
+                depth -= 1;
+                chars.next();
+            }
+            _ => {
+                chars.next();
+            }
+        }
+    }
 }
 
 fn walk(
@@ -266,11 +479,20 @@ fn project(cwd: Option<&Path>, home: Option<&Path>) -> String {
 pub struct Orphan {
     pub pid: Pid,
     pub name: String,
-    /// The session that spawned it, see [`Agent::label`].
+    /// The session that spawned it as `<kind>/<project>`.
     pub from: String,
+    /// The spawning session's [`Agent::session`].
+    pub session: Option<String>,
     pub start: u64,
     pub cpu: f32,
     pub mem: u64,
+}
+
+impl Orphan {
+    /// The spawning session, see [`Agent::label`].
+    pub fn label(&self) -> String {
+        tagged(&self.from, self.session.as_deref())
+    }
 }
 
 /// Remembers which processes agents spawned, to spot the ones left behind.
@@ -278,23 +500,24 @@ pub struct Orphan {
 /// it covers agents without a [`MARKERS`] entry.
 #[derive(Default)]
 pub struct OrphanTracker {
-    /// pid -> (spawning session's label, start time); start time guards
-    /// against pid reuse.
-    /// The label is stored so it survives the agent exiting.
-    seen: HashMap<Pid, (String, u64)>,
+    /// pid -> (spawning session's `<kind>/<project>`, its session name,
+    /// start time); start time guards against pid reuse.
+    /// The names are stored so they survive the agent exiting.
+    seen: HashMap<Pid, (String, Option<String>, u64)>,
 }
 
 impl OrphanTracker {
     pub fn update(&mut self, procs: &HashMap<Pid, ProcInfo>, agents: &[Agent]) -> Vec<Orphan> {
         self.seen
-            .retain(|pid, (_, start)| procs.get(pid).is_some_and(|p| p.start == *start));
+            .retain(|pid, (_, _, start)| procs.get(pid).is_some_and(|p| p.start == *start));
 
         let mut current = HashSet::new();
         for agent in agents {
-            let label = agent.label();
+            let from = format!("{}/{}", agent.kind, agent.project);
             for p in &agent.procs[1..] {
                 current.insert(p.pid);
-                self.seen.insert(p.pid, (label.clone(), p.start));
+                let session = agent.session.clone();
+                self.seen.insert(p.pid, (from.clone(), session, p.start));
             }
         }
         // A nested agent whose parent agent exited is now a root, not an orphan.
@@ -306,12 +529,13 @@ impl OrphanTracker {
             .seen
             .iter()
             .filter(|(pid, _)| !current.contains(pid))
-            .filter_map(|(pid, (from, start))| {
+            .filter_map(|(pid, (from, session, start))| {
                 let p = procs.get(pid)?;
                 Some(Orphan {
                     pid: *pid,
                     name: display_name(&p.name, &p.cmd),
                     from: from.clone(),
+                    session: session.clone(),
                     start: *start,
                     cpu: p.cpu,
                     mem: p.mem,
@@ -377,10 +601,15 @@ impl EnvOrphans {
                     .get(&agent)
                     .filter(|a| a.start <= p.start && agent_kind(&a.name, &a.cmd) == Some(kind));
                 let project = agent.map_or_else(|| "?".into(), |a| project(a.cwd.as_deref(), home));
+                // A root agent knows its session name.
+                let session = agent
+                    .and_then(|a| agents.iter().find(|r| r.procs[0].pid == a.pid))
+                    .and_then(|r| r.session.clone());
                 Some(Orphan {
                     pid: p.pid,
                     name: display_name(&p.name, &p.cmd),
                     from: format!("{kind}/{project}"),
+                    session,
                     start: p.start,
                     cpu: p.cpu,
                     mem: p.mem,
@@ -493,6 +722,10 @@ mod tests {
         (pid, info)
     }
 
+    fn no_session(_: Pid) -> Option<String> {
+        None
+    }
+
     fn home() -> Option<&'static Path> {
         Some(Path::new("/home/u"))
     }
@@ -567,7 +800,7 @@ mod tests {
             proc(11, 10, 101, "bash"),
             proc(12, 11, 102, "codex"),
         ]);
-        let agents = scan(&procs, home());
+        let agents = scan(&procs, home(), no_session);
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0].kind, "claude");
         let tree: Vec<(u32, usize)> = agents[0]
@@ -590,7 +823,7 @@ mod tests {
             busy(proc(21, 20, 201, "cargo"), 50.0),
             proc(30, 1, 300, "codex"),
         ]);
-        let roots: Vec<u32> = scan(&procs, home())
+        let roots: Vec<u32> = scan(&procs, home(), no_session)
             .iter()
             .map(|a| a.procs[0].pid.as_u32())
             .collect();
@@ -605,7 +838,7 @@ mod tests {
             in_dir(proc(20, 1, 200, "claude"), "/home/u/code/b"),
             proc(30, 1, 300, "codex"),
         ]);
-        let projects: Vec<String> = scan(&procs, home())
+        let projects: Vec<String> = scan(&procs, home(), no_session)
             .into_iter()
             .map(|a| a.project)
             .collect();
@@ -616,10 +849,14 @@ mod tests {
     fn child_left_behind_is_orphan() {
         let mut tracker = OrphanTracker::default();
         let procs = HashMap::from([proc(10, 1, 100, "claude"), proc(11, 10, 101, "vite")]);
-        assert!(tracker.update(&procs, &scan(&procs, home())).is_empty());
+        assert!(
+            tracker
+                .update(&procs, &scan(&procs, home(), no_session))
+                .is_empty()
+        );
 
         let procs = HashMap::from([proc(11, 1, 101, "vite")]);
-        let orphans = tracker.update(&procs, &scan(&procs, home()));
+        let orphans = tracker.update(&procs, &scan(&procs, home(), no_session));
         assert_eq!(pids(&orphans), [11]);
         assert_eq!(orphans[0].from, "claude/?");
     }
@@ -631,10 +868,10 @@ mod tests {
             in_dir(proc(10, 1, 100, "claude"), "/home/u/code/a"),
             proc(11, 10, 101, "vite"),
         ]);
-        tracker.update(&procs, &scan(&procs, home()));
+        tracker.update(&procs, &scan(&procs, home(), no_session));
 
         let procs = HashMap::from([proc(11, 1, 101, "vite")]);
-        let orphans = tracker.update(&procs, &scan(&procs, home()));
+        let orphans = tracker.update(&procs, &scan(&procs, home(), no_session));
         assert_eq!(orphans[0].from, "claude/a");
     }
 
@@ -642,10 +879,14 @@ mod tests {
     fn reused_pid_is_not_orphan() {
         let mut tracker = OrphanTracker::default();
         let procs = HashMap::from([proc(10, 1, 100, "claude"), proc(11, 10, 101, "vite")]);
-        tracker.update(&procs, &scan(&procs, home()));
+        tracker.update(&procs, &scan(&procs, home(), no_session));
 
         let procs = HashMap::from([proc(11, 1, 500, "vite")]);
-        assert!(tracker.update(&procs, &scan(&procs, home())).is_empty());
+        assert!(
+            tracker
+                .update(&procs, &scan(&procs, home(), no_session))
+                .is_empty()
+        );
     }
 
     // b4a0036
@@ -657,10 +898,10 @@ mod tests {
             proc(11, 10, 101, "bash"),
             proc(12, 11, 102, "codex"),
         ]);
-        tracker.update(&procs, &scan(&procs, home()));
+        tracker.update(&procs, &scan(&procs, home(), no_session));
 
         let procs = HashMap::from([proc(11, 1, 101, "bash"), proc(12, 11, 102, "codex")]);
-        let agents = scan(&procs, home());
+        let agents = scan(&procs, home(), no_session);
         assert_eq!(agents[0].procs[0].pid.as_u32(), 12);
         assert_eq!(pids(&tracker.update(&procs, &agents)), [11]);
     }
@@ -679,7 +920,7 @@ mod tests {
                 .contains(&pid.as_u32())
                 .then(|| environ(&["PATH=/bin", &var]))
         };
-        env.update(procs, &scan(procs, home()), home(), read)
+        env.update(procs, &scan(procs, home(), no_session), home(), read)
     }
 
     #[test]
@@ -753,7 +994,7 @@ mod tests {
         let mut env = EnvOrphans::new(Pid::from_u32(99));
         let mut reads = Vec::new();
         let mut tick = |env: &mut EnvOrphans, procs: &HashMap<Pid, ProcInfo>| {
-            let agents = scan(procs, home());
+            let agents = scan(procs, home(), no_session);
             env.update(procs, &agents, home(), |pid| {
                 reads.push(pid.as_u32());
                 // 12 is another user's process
@@ -781,6 +1022,7 @@ mod tests {
             pid: Pid::from_u32(pid),
             name: "tail".into(),
             from: from.into(),
+            session: None,
             start: 0,
             cpu: 0.0,
             mem: 0,
@@ -801,7 +1043,7 @@ mod tests {
     fn session(pid: u32, start: u64, cores: f32) -> Vec<Agent> {
         let (pid, mut info) = proc(pid, 1, start, "claude");
         info.cpu = cores * 100.0;
-        scan(&HashMap::from([(pid, info)]), home())
+        scan(&HashMap::from([(pid, info)]), home(), no_session)
     }
 
     const WINDOW: usize = 5;
@@ -847,6 +1089,217 @@ mod tests {
         let mut agents = session(10, 500, 1.0);
         busy.update(&mut agents);
         assert!(!agents[0].busy);
+    }
+
+    /// Session files by pid, as [`read_session`] returns them.
+    fn files(files: &[(u32, &str)]) -> impl FnMut(Pid) -> Option<String> {
+        let files: HashMap<u32, String> = files.iter().map(|&(p, f)| (p, f.to_string())).collect();
+        move |pid| files.get(&pid.as_u32()).cloned()
+    }
+
+    fn file(name: &str, source: &str, cwd: &str) -> String {
+        format!(r#"{{"pid":1,"cwd":"{cwd}","name":"{name}","nameSource":"{source}"}}"#)
+    }
+
+    /// Three claude sessions in /home/u/code/hum, started in pid order.
+    fn hum_trio() -> HashMap<Pid, ProcInfo> {
+        HashMap::from([
+            in_dir(proc(10, 1, 100, "claude"), "/home/u/code/hum"),
+            in_dir(proc(20, 1, 200, "claude"), "/home/u/code/hum"),
+            in_dir(proc(30, 1, 300, "claude"), "/home/u/code/hum"),
+        ])
+    }
+
+    /// Labels by root pid.
+    fn labels(agents: &[Agent]) -> Vec<String> {
+        let mut agents: Vec<&Agent> = agents.iter().collect();
+        agents.sort_by_key(|a| a.procs[0].pid);
+        agents.iter().map(|a| a.label()).collect()
+    }
+
+    const HUM: &str = "/home/u/code/hum";
+
+    #[test]
+    fn unique_project_has_no_session() {
+        let procs = HashMap::from([
+            in_dir(proc(10, 1, 100, "claude"), "/home/u/code/a"),
+            in_dir(proc(20, 1, 200, "codex"), "/home/u/code/a"),
+        ]);
+        let gate = file("gate", "user", "/home/u/code/a");
+        let agents = scan(&procs, home(), files(&[(10, &gate)]));
+        assert_eq!(labels(&agents), ["claude/a", "codex/a"]);
+    }
+
+    #[test]
+    fn shared_project_takes_user_and_auto_names() {
+        let (gate, exec, watch) = (
+            file("gate", "user", HUM),
+            file("exec", "auto", HUM),
+            file("watch", "user", HUM),
+        );
+        let agents = scan(
+            &hum_trio(),
+            home(),
+            files(&[(10, &gate), (20, &exec), (30, &watch)]),
+        );
+        assert_eq!(
+            labels(&agents),
+            ["claude/hum·gate", "claude/hum·exec", "claude/hum·watch"]
+        );
+    }
+
+    #[test]
+    fn argv_name_then_derived_name() {
+        let mut procs = hum_trio();
+        procs.get_mut(&Pid::from_u32(10)).unwrap().cmd =
+            ["claude", "--name", "gate"].map(OsString::from).to_vec();
+        procs.get_mut(&Pid::from_u32(20)).unwrap().cmd =
+            ["claude", "--name=exec"].map(OsString::from).to_vec();
+        // argv wins over a derived name
+        let (derived_10, derived_30) = (
+            file("hum-x", "derived", HUM),
+            file("hum-fix-ci", "derived", HUM),
+        );
+        let agents = scan(
+            &procs,
+            home(),
+            files(&[(10, &derived_10), (30, &derived_30)]),
+        );
+        assert_eq!(
+            labels(&agents),
+            ["claude/hum·gate", "claude/hum·exec", "claude/hum·fix-ci"]
+        );
+    }
+
+    #[test]
+    fn missing_or_garbage_file_falls_back_to_rank() {
+        let gate = file("gate", "user", HUM);
+        let agents = scan(
+            &hum_trio(),
+            home(),
+            files(&[(20, &gate), (30, "{not json")]),
+        );
+        assert_eq!(
+            labels(&agents),
+            ["claude/hum·1", "claude/hum·gate", "claude/hum·3"]
+        );
+    }
+
+    #[test]
+    fn rank_follows_start_time_not_pid() {
+        let mut procs = hum_trio();
+        procs.get_mut(&Pid::from_u32(10)).unwrap().start = 400;
+        let agents = scan(&procs, home(), no_session);
+        assert_eq!(
+            labels(&agents),
+            ["claude/hum·3", "claude/hum·1", "claude/hum·2"]
+        );
+    }
+
+    #[test]
+    fn duplicate_names_fall_back_to_rank() {
+        let gate = file("gate", "user", HUM);
+        let watch = file("watch", "user", HUM);
+        let agents = scan(
+            &hum_trio(),
+            home(),
+            files(&[(10, &gate), (20, &gate), (30, &watch)]),
+        );
+        assert_eq!(
+            labels(&agents),
+            ["claude/hum·1", "claude/hum·2", "claude/hum·watch"]
+        );
+    }
+
+    #[test]
+    fn file_of_other_cwd_is_ignored() {
+        // pid 10's file is left from an earlier session in another dir
+        let stale = file("gate", "user", "/home/u/code/other");
+        let agents = scan(&hum_trio(), home(), files(&[(10, &stale)]));
+        assert_eq!(labels(&agents)[0], "claude/hum·1");
+    }
+
+    #[test]
+    fn empty_file_name_falls_through_to_argv() {
+        let mut procs = hum_trio();
+        procs.get_mut(&Pid::from_u32(10)).unwrap().cmd =
+            ["claude", "--name", "gate"].map(OsString::from).to_vec();
+        let empty = file("", "user", HUM);
+        let agents = scan(&procs, home(), files(&[(10, &empty), (20, &empty)]));
+        assert_eq!(
+            labels(&agents),
+            ["claude/hum·gate", "claude/hum·2", "claude/hum·3"]
+        );
+    }
+
+    #[test]
+    fn name_matching_a_rank_falls_back_to_rank() {
+        // `hum-3` derives to `3`, which pid 30 gets as its rank
+        let three = file("hum-3", "derived", HUM);
+        let agents = scan(&hum_trio(), home(), files(&[(10, &three)]));
+        assert_eq!(
+            labels(&agents),
+            ["claude/hum·1", "claude/hum·2", "claude/hum·3"]
+        );
+        let far = file("hum-33", "derived", HUM);
+        let agents = scan(&hum_trio(), home(), files(&[(10, &far)]));
+        assert_eq!(labels(&agents)[0], "claude/hum·33");
+    }
+
+    #[test]
+    fn file_of_earlier_process_on_pid_is_stale() {
+        let file = r#"{"cwd":"/home/u/code/hum","procStart":"1223063","name":"gate"}"#;
+        let stat = |start: u64| format!("81045 (claude) S 1 2 3 {} {start} 0", "0 ".repeat(15));
+        assert!(same_process(file, &stat(1223063)));
+        assert!(!same_process(file, &stat(1300000)));
+        assert!(!same_process(file, "garbage"));
+        assert!(same_process(r#"{"cwd":"/x"}"#, &stat(1)));
+        // a comm with spaces and parens
+        let odd = format!("81045 (a) b) S 1 2 3 {} 1223063 0", "0 ".repeat(15));
+        assert!(same_process(file, &odd));
+    }
+
+    #[test]
+    fn nested_names_are_not_top_level() {
+        let json = r#"{"formerNames":[{"name":"old","nameSource":"user"}],"meta":{"cwd":"/x"},
+            "cwd":"/home/u/code/hum","nameSource":"user","name":"new \"one\"\\ é"}"#;
+        assert_eq!(
+            top_level_str(json, "name").as_deref(),
+            Some("new \"one\"\\ é")
+        );
+        assert_eq!(top_level_str(json, "cwd").as_deref(), Some(HUM));
+        let only_former =
+            r#"{"cwd":"/home/u/code/hum","formerNames":[{"name":"old","nameSource":"user"}]}"#;
+        assert_eq!(top_level_str(only_former, "name"), None);
+        assert_eq!(top_level_str(r#"{"name":3}"#, "name"), None);
+        assert_eq!(top_level_str("", "name"), None);
+    }
+
+    #[test]
+    fn env_orphan_takes_root_session_name() {
+        let mut procs = hum_trio();
+        procs.extend([proc(11, 1, 101, "tail")]);
+        let gate = file("gate", "user", HUM);
+        let agents = scan(&procs, home(), files(&[(10, &gate)]));
+        let mut env = EnvOrphans::new(Pid::from_u32(99));
+        let orphans = env.update(&procs, &agents, home(), |pid| {
+            (pid.as_u32() == 11).then(|| environ(&["CLAUDE_PID=10"]))
+        });
+        assert_eq!(orphans[0].label(), "claude/hum·gate");
+    }
+
+    #[test]
+    fn tracked_orphan_keeps_session_name() {
+        let mut tracker = OrphanTracker::default();
+        let mut procs = hum_trio();
+        procs.extend([proc(21, 20, 201, "vite")]);
+        let exec = file("exec", "user", HUM);
+        tracker.update(&procs, &scan(&procs, home(), files(&[(20, &exec)])));
+
+        procs.remove(&Pid::from_u32(20));
+        procs.extend([proc(21, 1, 201, "vite")]);
+        let orphans = tracker.update(&procs, &scan(&procs, home(), no_session));
+        assert_eq!(orphans[0].label(), "claude/hum·exec");
     }
 
     #[test]
