@@ -103,12 +103,6 @@ pub struct Agent {
 }
 
 impl Agent {
-    /// The session as `<kind>/<project>`, e.g. `claude/hum`, or
-    /// `claude/hum·gate` when it shares the project.
-    pub fn label(&self) -> String {
-        tagged(&from(self.kind, &self.project), self.session.as_deref())
-    }
-
     pub fn cpu(&self) -> f32 {
         self.procs.iter().map(|p| p.cpu).sum()
     }
@@ -169,11 +163,12 @@ pub fn scan(
 }
 
 /// `<kind>/<project>`, the label of a session without its name.
-fn from(kind: &str, project: &str) -> String {
+pub fn from(kind: &str, project: &str) -> String {
     format!("{kind}/{project}")
 }
 
-/// `<base>·<session>`, or `base` alone without a session.
+/// `<base>·<session>`, or `base` alone without a session, e.g.
+/// `claude/hum·gate` for a session that shares its project.
 pub fn tagged(base: &str, session: Option<&str>) -> String {
     match session {
         Some(s) => format!("{base}·{s}"),
@@ -512,13 +507,6 @@ pub struct Orphan {
     pub start: u64,
     pub cpu: f32,
     pub mem: u64,
-}
-
-impl Orphan {
-    /// The spawning session, see [`Agent::label`].
-    pub fn label(&self) -> String {
-        tagged(&self.from, self.session.as_deref())
-    }
 }
 
 /// Remembers which processes agents spawned, to spot the ones left behind.
@@ -1139,7 +1127,10 @@ mod tests {
     fn labels(agents: &[Agent]) -> Vec<String> {
         let mut agents: Vec<&Agent> = agents.iter().collect();
         agents.sort_by_key(|a| a.procs[0].pid);
-        agents.iter().map(|a| a.label()).collect()
+        agents
+            .iter()
+            .map(|a| tagged(&from(a.kind, &a.project), a.session.as_deref()))
+            .collect()
     }
 
     const HUM: &str = "/home/u/code/hum";
@@ -1349,7 +1340,10 @@ mod tests {
         let orphans = env.update(&procs, &agents, home(), |pid| {
             (pid.as_u32() == 11).then(|| environ(&["CLAUDE_PID=10"]))
         });
-        assert_eq!(orphans[0].label(), "claude/hum·gate");
+        assert_eq!(
+            tagged(&orphans[0].from, orphans[0].session.as_deref()),
+            "claude/hum·gate"
+        );
     }
 
     #[test]
@@ -1363,7 +1357,10 @@ mod tests {
         procs.remove(&Pid::from_u32(20));
         procs.extend([proc(21, 1, 201, "vite")]);
         let orphans = tracker.update(&procs, &scan(&procs, home(), no_session));
-        assert_eq!(orphans[0].label(), "claude/hum·exec");
+        assert_eq!(
+            tagged(&orphans[0].from, orphans[0].session.as_deref()),
+            "claude/hum·exec"
+        );
     }
 
     #[test]
