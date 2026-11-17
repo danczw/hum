@@ -2,6 +2,7 @@ mod agents;
 mod focus;
 mod ports;
 mod theme;
+mod trees;
 mod ui;
 
 use std::io;
@@ -16,7 +17,8 @@ use agents::{Agent, Orphan, OrphanTracker};
 use focus::Focus;
 use ports::Listener;
 use theme::Theme;
-use ui::View;
+use trees::Trees;
+use ui::{Fold, View};
 
 const TICK: Duration = Duration::from_secs(1);
 /// Ports change rarely and resolving owners reads every fd in /proc.
@@ -79,6 +81,7 @@ fn main() -> io::Result<()> {
         help: false,
         theme: Theme::from_env(),
         focus: Focus::default(),
+        trees: Trees::default(),
     };
     let terminal = ratatui::init();
     let result = run(terminal, &mut app, &mut view);
@@ -104,6 +107,7 @@ fn run(mut terminal: DefaultTerminal, app: &mut App, view: &mut View) -> io::Res
             && key.kind == KeyEventKind::Press
         {
             let focus = &mut view.focus;
+            let agents = &app.agents;
             match key.code {
                 KeyCode::Esc if view.help => view.help = false,
                 KeyCode::Esc if focus.clear() => {}
@@ -119,6 +123,11 @@ fn run(mut terminal: DefaultTerminal, app: &mut App, view: &mut View) -> io::Res
                 KeyCode::PageUp => focus.page(false),
                 KeyCode::Tab => focus.cycle(1),
                 KeyCode::BackTab => focus.cycle(-1),
+                KeyCode::Enter | KeyCode::Char(' ') => view.fold(agents, Fold::Toggle),
+                KeyCode::Char('l') | KeyCode::Right => view.fold(agents, Fold::Expand),
+                KeyCode::Char('h') | KeyCode::Left => view.fold(agents, Fold::Collapse),
+                KeyCode::Char('e') => view.trees.expand_all(agents),
+                KeyCode::Char('c') => view.collapse_all(agents),
                 _ => {}
             }
         }
