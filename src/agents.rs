@@ -248,7 +248,11 @@ fn argv_name(cmd: &[OsString]) -> Option<String> {
     let mut args = cmd.iter().skip(1).filter_map(|a| a.to_str());
     while let Some(arg) = args.next() {
         if arg == "--name" {
-            return args.next().map(str::to_string);
+            // `--name -p` means the value is missing
+            return args
+                .next()
+                .filter(|n| !n.starts_with('-'))
+                .map(str::to_string);
         }
         if let Some(name) = arg.strip_prefix("--name=") {
             return Some(name.to_string());
@@ -289,6 +293,7 @@ fn same_process(file: &str, stat: impl FnOnce() -> Option<String>) -> bool {
 /// Where [`read_session`] looks, from `$CLAUDE_CONFIG_DIR` and `$HOME`.
 pub fn claude_config(config_dir: Option<OsString>, home: Option<&Path>) -> Option<PathBuf> {
     config_dir
+        .filter(|d| !d.is_empty())
         .map(PathBuf::from)
         .or_else(|| Some(home?.join(".claude")))
 }
@@ -1299,6 +1304,22 @@ mod tests {
     fn missing_proc_start_skips_stat() {
         let stat = || -> Option<String> { panic!("stat read without procStart") };
         assert!(same_process(r#"{"cwd":"/x"}"#, stat));
+    }
+
+    #[test]
+    fn argv_name_skips_a_flag() {
+        let argv = |a: &[&str]| argv_name(&a.iter().map(OsString::from).collect::<Vec<_>>());
+        assert_eq!(argv(&["claude", "--name", "gate"]).as_deref(), Some("gate"));
+        assert_eq!(argv(&["claude", "--name", "-p"]), None);
+        assert_eq!(argv(&["claude", "--name"]), None);
+    }
+
+    #[test]
+    fn empty_config_dir_falls_back_to_home() {
+        let config = claude_config(Some(OsString::new()), home());
+        assert_eq!(config, Some(PathBuf::from("/home/u/.claude")));
+        let config = claude_config(Some("/c".into()), home());
+        assert_eq!(config, Some(PathBuf::from("/c")));
     }
 
     #[test]
