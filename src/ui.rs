@@ -845,7 +845,7 @@ fn title(section: &Section, shows: bool, theme: &Theme) -> Vec<Span<'static>> {
 }
 
 const HELP: [&str; 14] = [
-    "j k ↑ ↓  move the cursor",
+    "j k ↑ ↓  move cursor, scroll help",
     "g G      first, last row",
     "PgUp/Dn  move a page",
     "Tab      next section",
@@ -1709,8 +1709,8 @@ mod tests {
             help: true,
             ..view()
         };
-        // 4 rows need 4 columns, 125 wide; 5 rows fit in 3
-        for size in [(130, 6), (120, 7)] {
+        // 4 rows need 4 columns, 134 wide; 5 rows fit in 3
+        for size in [(134, 6), (120, 7)] {
             let lines = text(&draw_view(size, mockup(), &mut view));
             for help in HELP {
                 assert!(
