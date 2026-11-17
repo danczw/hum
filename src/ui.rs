@@ -862,19 +862,22 @@ const HELP: [&str; 14] = [
 
 fn draw_help(frame: &mut Frame) {
     let col = HELP.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let (left, right) = HELP.split_at(HELP.len().div_ceil(2));
+    let two: Vec<String> = left
+        .iter()
+        .zip(right.iter().chain([&""]))
+        .map(|(l, r)| format!("{l:<col$}  {r}"))
+        .collect();
+    // text plus border and padding
+    let width = |lines: &[String]| lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) + 4;
     // too short for one column: two side by side, if they fit across
     let area = frame.area();
-    let lines: Vec<String> =
-        if area.height < HELP.len() as u16 + 2 && area.width >= 2 * col as u16 + 6 {
-            let (left, right) = HELP.split_at(HELP.len().div_ceil(2));
-            left.iter()
-                .zip(right.iter().chain([&""]))
-                .map(|(l, r)| format!("{l:<col$}  {r}"))
-                .collect()
-        } else {
-            HELP.map(String::from).to_vec()
-        };
-    let width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) + 4;
+    let lines = if area.height < HELP.len() as u16 + 2 && width(&two) <= area.width as usize {
+        two
+    } else {
+        HELP.map(String::from).to_vec()
+    };
+    let width = width(&lines);
     let [area] = Layout::horizontal([Constraint::Length(width as u16)])
         .flex(Flex::Center)
         .areas(frame.area());
