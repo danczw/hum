@@ -1,9 +1,10 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::Style;
+use ratatui::symbols::border;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Cell, Clear, Padding, Paragraph, Row, Table, TableState,
+    Block, BorderType, Borders, Cell, Clear, Padding, Paragraph, Row, Table, TableState,
 };
 use sysinfo::Pid;
 
@@ -20,6 +21,10 @@ use crate::trees::{self, Trees};
 const PID: Constraint = Constraint::Length(7);
 /// `fmt_cores` up to 99.99 cores.
 const CORES: Constraint = Constraint::Length(5);
+/// Agents and orphans show cores as the 4th of 5 columns. Panes too narrow
+/// for their name columns drop it, and with it 5 chars and a gap.
+const CORES_COL: usize = 3;
+const CORES_SPAN: u16 = 5 + 1;
 /// `fmt_bytes` up to `1023.9M`.
 const MEM: Constraint = Constraint::Length(7);
 /// Agent process names, tree indent included, get at least this many chars.
@@ -34,19 +39,32 @@ const AGENTS_MIN: u16 = PROCESS + PROJECT + AGENTS_FIXED;
 /// Orphan process names are cut to the width of their `process` header.
 const ORPHAN_NAME: usize = 7;
 /// Fits a whole orphan row such as `9120 node claude/hum 0.00 48.0M` and
-/// the `process` header.
-const SIDE_MIN: u16 = 45;
+/// the `process` header. Narrower orphan sections drop cores.
+const SIDE_MIN: u16 = 44;
 /// Narrower panes stack the sections; wider ones put orphans and ports in a
 /// right-hand column.
 const WIDE: u16 = AGENTS_MIN + SIDE_MIN;
 
 /// From this height up a blank row separates the gauge line from the
-/// sections. In shorter panes that row goes to data.
+/// sections and each section is a box with a header. Shorter panes are
+/// compact: that row goes to data and the sections of a column share one
+/// box, see [`stack`].
 const AIRY: u16 = 12;
+
+/// Below this size only the gauge line and a hint show.
+const MIN_WIDTH: u16 = 40;
+const MIN_HEIGHT: u16 = 6;
 
 /// Rows a section's rounded box takes without data rows: top and bottom
 /// border.
 const BOX: u16 = 2;
+
+/// The top of a section below another in a compact box: `├ orphans: 1 ─┤`.
+const DIVIDER: border::Set = border::Set {
+    top_left: "├",
+    top_right: "┤",
+    ..border::ROUNDED
+};
 
 /// What the user toggles while hum runs.
 pub struct View {
@@ -138,6 +156,8 @@ struct Section {
     /// One per row.
     keys: Vec<Key>,
     widths: Vec<Constraint>,
+    /// The rows as short entries for a title line; only ports fold into one.
+    inline: Vec<String>,
 }
 
 pub fn draw(frame: &mut Frame, app: &App, view: &mut View) {
@@ -174,32 +194,35 @@ fn render(frame: &mut Frame, screen: &Screen, view: &mut View) {
     view.sync(screen.agents);
     let (theme, trees) = (&view.theme, &view.trees);
     let focus = &mut view.focus;
-    let pad = u16::from(frame.area().height >= AIRY);
+    let area = frame.area();
+    if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
+        let [gauges, hint] = Layout::vertical([Constraint::Length(1); 2]).areas(area);
+        draw_gauges(frame, screen, gauges, theme);
+        frame.render_widget(Line::styled("too small", theme.dim), hint);
+        return;
+    }
+    let compact = area.height < AIRY;
     let [gauges, _, body] = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(pad),
+        Constraint::Length(u16::from(!compact)),
         Constraint::Fill(1),
     ])
-    .areas(frame.area());
+    .areas(area);
     draw_gauges(frame, screen, gauges, theme);
 
-    let orphans = orphans_section(screen.orphans, theme);
     let ports = ports_section(&screen.ports);
     if body.width >= WIDE {
         let side = (body.width * 2 / 5).max(SIDE_MIN);
         let [left, right] =
             Layout::horizontal([Constraint::Fill(1), Constraint::Length(side)]).areas(body);
-        draw_section(
-            frame,
-            agents_section(screen.agents, trees, left.width, theme),
-            left,
-            theme,
-            focus,
-        );
-        stack(frame, [orphans, ports], right, theme, focus);
+        let agents = agents_section(screen.agents, trees, left.width, theme);
+        let orphans = orphans_section(screen.orphans, right.width, theme);
+        stack(frame, [agents], left, compact, theme, focus);
+        stack(frame, [orphans, ports], right, compact, theme, focus);
     } else {
         let agents = agents_section(screen.agents, trees, body.width, theme);
-        stack(frame, [agents, orphans, ports], body, theme, focus);
+        let orphans = orphans_section(screen.orphans, body.width, theme);
+        stack(frame, [agents, orphans, ports], body, compact, theme, focus);
     }
 
     if view.help {
@@ -252,9 +275,10 @@ fn draw_gauges(frame: &mut Frame, screen: &Screen, area: Rect, theme: &Theme) {
 
 /// `width` is the whole box. Width beyond both names' minimum goes 3:1 to
 /// process and project, and names longer than their column end in `…`.
+/// Below both minimums the cores column goes first, then project gives way.
 fn agents_section(agents: &[Agent], trees: &Trees, width: u16, theme: &Theme) -> Section {
-    let names = width.saturating_sub(AGENTS_FIXED);
-    // below both minimums project gives way first
+    let cores = width >= AGENTS_MIN;
+    let names = (width + if cores { 0 } else { CORES_SPAN }).saturating_sub(AGENTS_FIXED);
     let project =
         names.saturating_sub(PROCESS).min(PROJECT) + names.saturating_sub(PROCESS + PROJECT) / 4;
     let process = names - project;
@@ -275,13 +299,16 @@ fn agents_section(agents: &[Agent], trees: &Trees, width: u16, theme: &Theme) ->
         };
         let kind = cut(agent.kind, process_max.saturating_sub(2 + count.len()));
         rows.push(
-            Row::new([
-                Cell::from(cut(&format!("{marker} {kind}{count}"), process_max)),
-                Cell::from(cut(&agent.project, project_max)),
-                num(root.pid.to_string()),
-                num(fmt_cores(agent.cpu())),
-                num(fmt_bytes(agent.mem())),
-            ])
+            Row::new(columns(
+                [
+                    Cell::from(cut(&format!("{marker} {kind}{count}"), process_max)),
+                    Cell::from(cut(&agent.project, project_max)),
+                    num(root.pid.to_string()),
+                    num(fmt_cores(agent.cpu())),
+                    num(fmt_bytes(agent.mem())),
+                ],
+                cores,
+            ))
             .style(theme.accent),
         );
         keys.push(root_key);
@@ -289,17 +316,20 @@ fn agents_section(agents: &[Agent], trees: &Trees, width: u16, theme: &Theme) ->
             continue;
         }
         for p in kids {
-            rows.push(Row::new([
-                Cell::from(cut(
-                    &format!("{}└ {}", "  ".repeat(p.depth - 1), p.name),
-                    process_max,
-                )),
-                // Cell::default() spans zero columns and would shift the rest.
-                Cell::from(""),
-                num(p.pid.to_string()),
-                num(fmt_cores(p.cpu)),
-                num(fmt_bytes(p.mem)),
-            ]));
+            rows.push(Row::new(columns(
+                [
+                    Cell::from(cut(
+                        &format!("{}└ {}", "  ".repeat(p.depth - 1), p.name),
+                        process_max,
+                    )),
+                    // Cell::default() spans zero columns and would shift the rest.
+                    Cell::from(""),
+                    num(p.pid.to_string()),
+                    num(fmt_cores(p.cpu)),
+                    num(fmt_bytes(p.mem)),
+                ],
+                cores,
+            )));
             keys.push(key(p.pid, p.start));
         }
     }
@@ -308,37 +338,49 @@ fn agents_section(agents: &[Agent], trees: &Trees, width: u16, theme: &Theme) ->
         pane: focus::AGENTS,
         count: agents.len(),
         count_style: None,
-        header: Row::new([
-            Cell::from("process"),
-            Cell::from("project"),
-            num("pid".into()),
-            num("cores".into()),
-            num("mem".into()),
-        ]),
+        header: Row::new(columns(
+            [
+                Cell::from("process"),
+                Cell::from("project"),
+                num("pid".into()),
+                num("cores".into()),
+                num("mem".into()),
+            ],
+            cores,
+        )),
         rows,
         keys,
-        widths: vec![
-            Constraint::Length(process),
-            Constraint::Length(project),
-            PID,
-            CORES,
-            MEM,
-        ],
+        widths: columns(
+            [
+                Constraint::Length(process),
+                Constraint::Length(project),
+                PID,
+                CORES,
+                MEM,
+            ],
+            cores,
+        ),
+        inline: Vec::new(),
     }
 }
 
 /// Orphan rows warn, except `from`: agent tags keep the default color.
-fn orphans_section(orphans: &[Orphan], theme: &Theme) -> Section {
+/// `width` is the whole box.
+fn orphans_section(orphans: &[Orphan], width: u16, theme: &Theme) -> Section {
+    let cores = width >= SIDE_MIN;
     let rows = orphans
         .iter()
         .map(|o| {
-            Row::new([
-                num(o.pid.to_string()),
-                Cell::from(cut(&o.name, ORPHAN_NAME)),
-                Cell::from(o.from.clone()).style(Style::reset()),
-                num(fmt_cores(o.cpu)),
-                num(fmt_bytes(o.mem)),
-            ])
+            Row::new(columns(
+                [
+                    num(o.pid.to_string()),
+                    Cell::from(cut(&o.name, ORPHAN_NAME)),
+                    Cell::from(o.from.clone()).style(Style::reset()),
+                    num(fmt_cores(o.cpu)),
+                    num(fmt_bytes(o.mem)),
+                ],
+                cores,
+            ))
             .style(theme.warn)
         })
         .collect();
@@ -347,24 +389,40 @@ fn orphans_section(orphans: &[Orphan], theme: &Theme) -> Section {
         pane: focus::ORPHANS,
         count: orphans.len(),
         count_style: (!orphans.is_empty()).then_some(theme.warn),
-        header: Row::new([
-            num("pid".into()),
-            Cell::from("process"),
-            Cell::from("from"),
-            num("cores".into()),
-            num("mem".into()),
-        ]),
+        header: Row::new(columns(
+            [
+                num("pid".into()),
+                Cell::from("process"),
+                Cell::from("from"),
+                num("cores".into()),
+                num("mem".into()),
+            ],
+            cores,
+        )),
         rows,
         keys: orphans.iter().map(|o| key(o.pid, o.start)).collect(),
         // name as wide as its `process` header; `from` takes the rest
-        widths: vec![
-            PID,
-            Constraint::Length(ORPHAN_NAME as u16),
-            Constraint::Fill(1),
-            CORES,
-            MEM,
-        ],
+        widths: columns(
+            [
+                PID,
+                Constraint::Length(ORPHAN_NAME as u16),
+                Constraint::Fill(1),
+                CORES,
+                MEM,
+            ],
+            cores,
+        ),
+        inline: Vec::new(),
     }
+}
+
+/// The columns of an agents or orphans row, without cores unless `cores`.
+fn columns<T>(columns: [T; 5], cores: bool) -> Vec<T> {
+    let mut columns = Vec::from(columns);
+    if !cores {
+        columns.remove(CORES_COL);
+    }
+    columns
 }
 
 fn ports_section(ports: &[PortRow]) -> Section {
@@ -401,78 +459,129 @@ fn ports_section(ports: &[PortRow]) -> Section {
             Constraint::Fill(1),
             Constraint::Fill(2),
         ],
+        // `:3000 node claude/hum`, or `:5432 postgres` without an owner
+        inline: ports
+            .iter()
+            .map(|p| {
+                [format!(":{}", p.port), p.name.clone()]
+                    .into_iter()
+                    .chain(p.owner.clone())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect(),
     }
 }
 
 /// Stacks sections top to bottom. Every section keeps its title. The
 /// focused section first gets a line for its cursor, then data rows go to
-/// the earlier sections first, and a header only shows with at least one
-/// row under it. Rows nobody needs are shared out so the boxes fill the
-/// area.
+/// the earlier sections first. Rows nobody needs are shared out so the
+/// boxes fill the area.
+///
+/// Each section is a box, and a header only shows with at least one row
+/// under it. `compact`, the sections share one box split by `├ name ─┤`
+/// lines, drop their headers, and ports fold into the bottom border.
 fn stack<const N: usize>(
     frame: &mut Frame,
     sections: [Section; N],
     area: Rect,
+    compact: bool,
     theme: &Theme,
     focus: &mut Focus,
 ) {
+    let footer = compact && sections[N - 1].pane == focus::PORTS;
+    let header = u16::from(!compact);
     let mut left = area.height;
     let mut heights = [0; N];
-    for h in &mut heights {
-        *h = BOX.min(left);
+    for (i, h) in heights.iter_mut().enumerate() {
+        // compact: a title line each, and a bottom border unless the footer
+        // is one
+        let chrome = if compact {
+            1 + u16::from(i == N - 1 && !footer)
+        } else {
+            BOX
+        };
+        *h = chrome.min(left);
         left -= *h;
     }
-    // header and data lines; with one line the cursor row goes without its
-    // header, see `draw_section`
+    let rows: [usize; N] = std::array::from_fn(|i| {
+        if footer && i == N - 1 {
+            0
+        } else {
+            sections[i].rows.len()
+        }
+    });
+    // header and data lines; a section given one line shows a row without
+    // its header, see `draw_section`
     let mut lines = [0; N];
-    for (l, section) in lines.iter_mut().zip(&sections) {
-        if focus.shows(section.pane) && !section.rows.is_empty() {
-            *l = left.min(2);
+    for ((l, section), &n) in lines.iter_mut().zip(&sections).zip(&rows) {
+        if focus.shows(section.pane) && n > 0 {
+            *l = left.min(1 + header);
             left -= *l;
         }
     }
-    for (l, section) in lines.iter_mut().zip(&sections) {
-        if section.rows.is_empty() || (*l == 0 && left < 2) {
+    for (l, &n) in lines.iter_mut().zip(&rows) {
+        if n == 0 {
             continue;
         }
-        let want = u16::try_from(section.rows.len() + 1).unwrap_or(u16::MAX);
+        let want = u16::try_from(n).unwrap_or(u16::MAX).saturating_add(header);
         let rows = want.saturating_sub(*l).min(left);
         *l += rows;
         left -= rows;
     }
-    let share = left / N as u16;
+    // the footer stays one line
+    let growing = N as u16 - u16::from(footer);
+    let share = left / growing;
     for (i, (h, l)) in heights.iter_mut().zip(lines).enumerate() {
-        // the remainder goes to the first sections
-        *h += l + share + u16::from((i as u16) < left % N as u16);
+        if (i as u16) < growing {
+            // the remainder goes to the first sections
+            *h += l + share + u16::from((i as u16) < left % growing);
+        }
     }
     let areas: [Rect; N] = Layout::vertical(heights.map(Constraint::Length)).areas(area);
-    for (section, area) in sections.into_iter().zip(areas) {
-        draw_section(frame, section, area, theme, focus);
+    for (i, (section, area)) in sections.into_iter().zip(areas).enumerate() {
+        let block = if !compact {
+            Block::bordered().border_type(BorderType::Rounded)
+        } else if footer && i == N - 1 {
+            draw_footer(frame, section, area, theme, focus);
+            continue;
+        } else {
+            let bottom = if i == N - 1 {
+                Borders::BOTTOM
+            } else {
+                Borders::NONE
+            };
+            Block::new()
+                .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT | bottom)
+                .border_set(if i == 0 { border::ROUNDED } else { DIVIDER })
+        };
+        draw_section(frame, section, area, block, !compact, theme, focus);
     }
 }
 
-/// A thin rounded dim box with the title and count in its top border. The
+/// `block` with the title and count in its top border and a dim frame. The
 /// rows scroll to keep the cursor in view, and a last `+N more` line counts
 /// the rows below. The focused section's name takes the accent.
-fn draw_section(frame: &mut Frame, section: Section, area: Rect, theme: &Theme, focus: &mut Focus) {
+fn draw_section(
+    frame: &mut Frame,
+    section: Section,
+    area: Rect,
+    block: Block,
+    header: bool,
+    theme: &Theme,
+    focus: &mut Focus,
+) {
     let shows = focus.shows(section.pane);
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
+    let mut title = title(&section, shows, theme);
+    title.push(Span::styled(" ", theme.dim));
+    let block = block
         .border_style(theme.dim)
         .padding(Padding::horizontal(1))
-        .title(Line::from(vec![
-            Span::styled(" ", theme.dim),
-            Span::styled(section.name, if shows { theme.accent } else { theme.dim }),
-            Span::styled(": ", theme.dim),
-            Span::styled(
-                section.count.to_string(),
-                section.count_style.unwrap_or(theme.dim),
-            ),
-            Span::styled(" ", theme.dim),
-        ]));
+        .title(Line::from(title));
     let inner = block.inner(area);
     // a single line goes to a row, not to a header with nothing under it
-    let header = inner.height >= 2 || section.keys.is_empty();
+    let header = header && (inner.height >= 2 || section.keys.is_empty());
     let lines = inner.height.saturating_sub(u16::from(header));
     let window = focus
         .pane(section.pane)
@@ -502,6 +611,66 @@ fn draw_section(frame: &mut Frame, section: Section, area: Rect, theme: &Theme, 
             last,
         );
     }
+}
+
+/// A section folded into the bottom border of a compact box:
+/// `╰ ports: 2 · :3000 node claude/hum  :5432 postgres ──╯`. Entries that do
+/// not fit are counted as `+N`. Its rows give up their cursor, so `Tab`
+/// passes over the section.
+fn draw_footer(frame: &mut Frame, section: Section, area: Rect, theme: &Theme, focus: &mut Focus) {
+    focus.pane(section.pane).frame(Vec::new(), 0);
+    let mut spans = title(&section, false, theme);
+    // corners, the closing space and at least one rule
+    let mut room = usize::from(area.width).saturating_sub(Line::from(spans.clone()).width() + 4);
+    let entries = &section.inline;
+    let mut shown = 0;
+    for (i, entry) in entries.iter().enumerate() {
+        let sep = if i == 0 { " · " } else { "  " };
+        let len = sep.chars().count() + entry.chars().count();
+        // keep room for `  +N` after this entry
+        let rest = entries.len() - i - 1;
+        let tail = if rest == 0 {
+            0
+        } else {
+            3 + rest.to_string().len()
+        };
+        if len + tail > room {
+            break;
+        }
+        room -= len;
+        spans.push(Span::styled(sep, theme.dim));
+        // reset: title cells keep the border's dim color
+        spans.push(Span::styled(entry.clone(), Style::reset()));
+        shown += 1;
+    }
+    if shown < entries.len() {
+        let sep = if shown == 0 { " · " } else { "  " };
+        spans.push(Span::styled(sep, theme.dim));
+        spans.push(Span::styled(
+            format!("+{}", entries.len() - shown),
+            theme.dim,
+        ));
+    }
+    spans.push(Span::styled(" ", theme.dim));
+    let block = Block::new()
+        .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+        .border_type(BorderType::Rounded)
+        .border_style(theme.dim)
+        .title_bottom(Line::from(spans));
+    frame.render_widget(block, area);
+}
+
+/// ` agents: 3` for a section's border, without the closing space.
+fn title(section: &Section, shows: bool, theme: &Theme) -> Vec<Span<'static>> {
+    vec![
+        Span::styled(" ", theme.dim),
+        Span::styled(section.name, if shows { theme.accent } else { theme.dim }),
+        Span::styled(": ", theme.dim),
+        Span::styled(
+            section.count.to_string(),
+            section.count_style.unwrap_or(theme.dim),
+        ),
+    ]
 }
 
 fn draw_help(frame: &mut Frame) {
@@ -831,19 +1000,100 @@ mod tests {
     }
 
     #[test]
-    fn every_title_fits_the_small_pane() {
+    fn small_pane_draws_the_mockup() {
         let lines = lines();
         assert!(lines[0].starts_with("cpu ⣿"), "{}", lines[0]);
         for label in [" 34%", "   mem ⣿", " 12.1/31G", "   swp ⡀", " 0.0/8G"] {
             assert!(lines[0].contains(label), "{label:?} in {}", lines[0]);
         }
         assert_eq!(lines[1], format!("╭ agents: 3 {}╮", "─".repeat(61)));
-        assert!(lines[2].starts_with("│ process") && lines[2].ends_with("mem │"));
-        assert!(lines[3].starts_with("│   claude") && lines[3].ends_with("310.0M │"));
-        assert_eq!(lines[4], format!("╰{}╯", "─".repeat(72)));
-        assert_eq!(lines[5], format!("╭ orphans: 1 {}╮", "─".repeat(60)));
-        assert_eq!(lines[7], format!("╭ ports: 2 {}╮", "─".repeat(62)));
-        assert_eq!(lines[8], format!("╰{}╯", "─".repeat(72)));
+        for (line, pid) in lines[2..5].iter().zip(["4123", "5871", "6002"]) {
+            assert!(
+                line.starts_with("│   c") && line.contains(pid),
+                "{lines:#?}"
+            );
+            assert!(line.ends_with("M │"), "{lines:#?}");
+        }
+        // the spare row stays inside the box
+        assert!(lines[5].trim_matches(['│', ' ']).is_empty(), "{lines:#?}");
+        assert_eq!(lines[6], format!("├ orphans: 1 {}┤", "─".repeat(60)));
+        assert!(lines[7].starts_with("│    9120 node "), "{lines:#?}");
+        let ports = "╰ ports: 2 · :3000 node claude/hum  :5432 postgres ";
+        assert_eq!(
+            lines[8],
+            format!("{ports}{}╯", "─".repeat(73 - ports.chars().count()))
+        );
+    }
+
+    #[test]
+    fn ports_that_do_not_fit_the_border_are_counted() {
+        let buf = draw((50, 9), mockup(), Theme::ayu_mirage());
+        let last = text(&buf).pop().unwrap();
+        assert!(
+            last.starts_with("╰ ports: 2 · :3000 node claude/hum  +1 ─"),
+            "{last}"
+        );
+        // entries keep the default color, not the border's
+        assert_eq!(fg_at(&buf, ":3000", 0), Default::default());
+    }
+
+    #[test]
+    fn inline_ports_take_no_cursor() {
+        let mut view = view();
+        draw_view((74, 9), mockup(), &mut view);
+        view.focus.cycle(1);
+        view.focus.cycle(1);
+        // orphans, then back to agents past the folded ports
+        view.focus.cycle(1);
+        let buf = draw_view((74, 9), mockup(), &mut view);
+        assert!(selected_line(&buf, &view.theme).unwrap().contains("4123"));
+    }
+
+    #[test]
+    fn empty_section_keeps_its_divider() {
+        let lines = draw_lines((74, 9), big_tree(29));
+        let at = lines.iter().position(|l| l.starts_with("├ orphans: 1 "));
+        // agents take every row before orphans
+        assert_eq!(at, Some(7), "{lines:#?}");
+        assert!(lines[8].starts_with("╰ ports: 2 "), "{lines:#?}");
+    }
+
+    #[test]
+    fn tiny_panes_show_only_the_gauges() {
+        for size in [(39, 9), (74, 5)] {
+            let lines = draw_lines(size, mockup());
+            assert!(lines[0].starts_with("cpu "), "{lines:#?}");
+            assert_eq!(lines[1].trim_end(), "too small");
+            assert!(lines[2..].iter().all(|l| l.trim().is_empty()), "{lines:#?}");
+        }
+    }
+
+    #[test]
+    fn wide_compact_panes_fold_ports_into_the_side_box() {
+        let lines = draw_lines((148, 9), mockup());
+        assert!(
+            lines[1].starts_with("╭ agents: 3 ") && lines[1].contains("╮╭ orphans: 1 "),
+            "{lines:#?}"
+        );
+        assert!(lines[8].contains("╯╰ ports: 2 · :3000 "), "{lines:#?}");
+    }
+
+    #[test]
+    fn side_column_starts_at_92_cols() {
+        let side = |width| draw_lines((width, 16), mockup())[2].contains("╭ orphans: 1 ");
+        assert!(side(92));
+        assert!(!side(91));
+    }
+
+    #[test]
+    fn narrow_panes_drop_the_cores_column() {
+        let cores = |width| draw_lines((width, 16), mockup())[3].contains("cores");
+        assert!(cores(48));
+        assert!(!cores(47));
+        let lines = draw_lines((40, 16), mockup());
+        // project and orphan `from` keep their room
+        assert!(lines[4].contains(" hum "), "{lines:#?}");
+        assert!(lines.iter().any(|l| l.contains("claude/hum")), "{lines:#?}");
     }
 
     fn bar(ratio: f64, width: usize) -> String {
@@ -898,14 +1148,14 @@ mod tests {
     }
 
     #[test]
-    fn long_names_are_cut_so_93_cols_fit_side_by_side() {
+    fn long_names_are_cut_so_92_cols_fit_side_by_side() {
         let mut procs = mockup();
         procs.extend([
             child_proc(9169, 4123, "rust-analyzer"),
             child_proc(9342, 9169, "rust-analyzer-proc-macro-srv"),
             root_proc(7000, "claude", "/x/claude-code-plugins", 1 << 20),
         ]);
-        let lines = draw_lines((93, 20), procs);
+        let lines = draw_lines((92, 20), procs);
         // orphans sit right of agents
         assert!(
             lines[2].starts_with("╭ agents: 4 ") && lines[2].contains("╭ orphans: 1 "),
@@ -966,8 +1216,8 @@ mod tests {
 
     #[test]
     fn narrow_panes_cut_project_before_process() {
-        let lines = draw_lines((40, 9), mockup());
-        assert!(lines[3].starts_with("│   claude "), "{lines:#?}");
+        let lines = draw_lines((40, 16), mockup());
+        assert!(lines[4].starts_with("│   claude "), "{lines:#?}");
     }
 
     #[test]
