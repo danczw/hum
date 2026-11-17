@@ -4,7 +4,7 @@ pub const USAGE: &str = "\
 Usage: hum [options]
 
 Options:
-  --interval <secs>  Tick length in seconds, fractions allowed [default: 1]
+  --interval <secs>  Tick length in seconds, 0.2 to 3600 [default: 1]
   --agent <name>     Also treat processes named <name> as agents; repeatable
   -h, --help         Print this help
   -V, --version      Print the version";
@@ -28,13 +28,16 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Action, String> {
     };
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
-        let (flag, inline) = match arg.split_once('=') {
+        let (flag, mut inline) = match arg.split_once('=') {
             Some((f, v)) if f.starts_with("--") => (f.to_owned(), Some(v.to_owned())),
             _ => (arg, None),
         };
+        if inline.is_some() && matches!(flag.as_str(), "--help" | "--version") {
+            return Err(format!("{flag} takes no value"));
+        }
         let mut value = || {
             inline
-                .clone()
+                .take()
                 .or_else(|| args.next())
                 .ok_or_else(|| format!("{flag} needs a value"))
         };
@@ -42,19 +45,32 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Action, String> {
             "-h" | "--help" => return Ok(Action::Help),
             "-V" | "--version" => return Ok(Action::Version),
             "--interval" => opts.interval = interval(&value()?)?,
-            "--agent" => opts.agents.push(value()?),
+            "--agent" => opts.agents.push(agent(value()?)?),
             _ => return Err(format!("unknown argument {flag}")),
         }
     }
     Ok(Action::Run(opts))
 }
 
+/// sysinfo needs 0.2 seconds between cpu reads; the top end keeps the
+/// float well inside what a Duration holds.
 fn interval(s: &str) -> Result<Duration, String> {
     s.parse::<f64>()
         .ok()
-        .and_then(|secs| Duration::try_from_secs_f64(secs).ok())
-        .filter(|d| !d.is_zero())
-        .ok_or_else(|| format!("--interval needs a number of seconds above 0, got {s}"))
+        .filter(|secs| (0.2..=3600.0).contains(secs))
+        .map(Duration::from_secs_f64)
+        .ok_or_else(|| format!("--interval takes 0.2 to 3600 seconds, got {s}"))
+}
+
+/// A name is matched against a process or script basename, so it can hold
+/// no '/'.
+fn agent(name: String) -> Result<String, String> {
+    if name.is_empty() || name.contains('/') {
+        return Err(format!(
+            "--agent takes a program name without '/', got '{name}'"
+        ));
+    }
+    Ok(name)
 }
 
 #[cfg(test)]
@@ -88,8 +104,16 @@ mod tests {
     }
 
     #[test]
-    fn interval_must_be_a_number_above_zero() {
-        for bad in ["0", "-1", "nan", "inf", "abc"] {
+    fn interval_takes_0_2_to_3600() {
+        assert_eq!(
+            run(&["--interval", "0.2"]).unwrap().interval,
+            Duration::from_millis(200)
+        );
+        assert_eq!(
+            run(&["--interval", "3600"]).unwrap().interval,
+            Duration::from_secs(3600)
+        );
+        for bad in ["0", "0.1", "3601", "1e300", "-1", "nan", "inf", "abc"] {
             assert!(run(&["--interval", bad]).is_err(), "{bad}");
         }
     }
@@ -98,6 +122,20 @@ mod tests {
     fn agent_repeats() {
         let opts = run(&["--agent", "goose", "--agent=amp"]).unwrap();
         assert_eq!(opts.agents, ["goose", "amp"]);
+    }
+
+    #[test]
+    fn agent_must_be_a_bare_name() {
+        assert!(run(&["--agent", ""]).is_err());
+        assert!(run(&["--agent="]).is_err());
+        assert!(run(&["--agent", "/usr/bin/goose"]).is_err());
+        assert!(run(&["--agent", "x/goose"]).is_err());
+    }
+
+    #[test]
+    fn help_and_version_take_no_value() {
+        assert!(parse(["--help=x".to_string()]).is_err());
+        assert!(parse(["--version=x".to_string()]).is_err());
     }
 
     #[test]
