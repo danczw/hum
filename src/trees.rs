@@ -29,8 +29,11 @@ impl Trees {
         self.open.remove(&root);
     }
 
+    /// Childless roots stay closed, so children spawned later start
+    /// collapsed.
     pub fn expand_all(&mut self, agents: &[Agent]) {
-        self.open.extend(agents.iter().map(root));
+        self.open
+            .extend(agents.iter().filter(|a| a.procs.len() > 1).map(root));
     }
 
     pub fn collapse_all(&mut self) {
@@ -49,12 +52,11 @@ pub fn root(agent: &Agent) -> Key {
     key(p.pid, p.start)
 }
 
-/// The root of the tree that holds the process `of`.
-pub fn root_of(agents: &[Agent], of: Key) -> Option<Key> {
+/// The session whose tree holds the process `of`.
+pub fn tree_of(agents: &[Agent], of: Key) -> Option<&Agent> {
     agents
         .iter()
         .find(|a| a.procs.iter().any(|p| key(p.pid, p.start) == of))
-        .map(root)
 }
 
 #[cfg(test)]
@@ -117,10 +119,20 @@ mod tests {
     }
 
     #[test]
-    fn root_of_finds_the_tree_of_a_child() {
+    fn tree_of_finds_the_session_of_a_child() {
         let now = agents(&[10, 20]);
         let child = key(Pid::from_u32(21), 7);
-        assert_eq!(root_of(&now, child), Some(root(&now[1])));
-        assert_eq!(root_of(&now, key(Pid::from_u32(21), 8)), None);
+        assert_eq!(tree_of(&now, child).map(root), Some(root(&now[1])));
+        assert!(tree_of(&now, key(Pid::from_u32(21), 8)).is_none());
+    }
+
+    #[test]
+    fn expand_all_leaves_childless_roots_closed() {
+        let mut trees = Trees::default();
+        let mut now = agents(&[10, 20]);
+        now[1].procs.truncate(1);
+        trees.expand_all(&now);
+        assert!(trees.is_open(root(&now[0])));
+        assert!(!trees.is_open(root(&now[1])));
     }
 }

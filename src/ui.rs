@@ -65,8 +65,7 @@ pub enum Fold {
 }
 
 impl View {
-    /// Expands or collapses the tree under the agents cursor. A cursor whose
-    /// row collapses away moves to the root.
+    /// Expands or collapses the tree under the agents cursor.
     pub fn fold(&mut self, agents: &[Agent], fold: Fold) {
         if !self.focus.shows(focus::AGENTS) {
             return;
@@ -74,28 +73,33 @@ impl View {
         let Some(at) = self.focus.selected(focus::AGENTS) else {
             return;
         };
-        let Some(root) = trees::root_of(agents, at) else {
+        let Some(agent) = trees::tree_of(agents, at) else {
             return;
         };
+        let root = trees::root(agent);
         match fold {
+            Fold::Collapse if at != root => self.focus.select(focus::AGENTS, root),
+            // kept closed, so children spawned later start collapsed
+            _ if agent.procs.len() == 1 => {}
             Fold::Toggle => self.trees.toggle(root),
             Fold::Expand => self.trees.expand(root),
-            Fold::Collapse if at == root => self.trees.collapse(root),
-            Fold::Collapse => {}
-        }
-        if matches!(fold, Fold::Collapse) || !self.trees.is_open(root) {
-            self.focus.select(focus::AGENTS, root);
+            Fold::Collapse => self.trees.collapse(root),
         }
     }
 
-    pub fn collapse_all(&mut self, agents: &[Agent]) {
-        self.trees.collapse_all();
-        if let Some(root) = self
+    /// Forgets exited sessions and moves a cursor whose row collapsed away,
+    /// by a key or a new root, to its root.
+    fn sync(&mut self, agents: &[Agent]) {
+        self.trees.retain(agents);
+        if let Some(agent) = self
             .focus
             .selected(focus::AGENTS)
-            .and_then(|at| trees::root_of(agents, at))
+            .and_then(|at| trees::tree_of(agents, at))
         {
-            self.focus.select(focus::AGENTS, root);
+            let root = trees::root(agent);
+            if !self.trees.is_open(root) {
+                self.focus.select(focus::AGENTS, root);
+            }
         }
     }
 }
@@ -167,7 +171,7 @@ fn screen(app: &App) -> Screen<'_> {
 }
 
 fn render(frame: &mut Frame, screen: &Screen, view: &mut View) {
-    view.trees.retain(screen.agents);
+    view.sync(screen.agents);
     let (theme, trees) = (&view.theme, &view.trees);
     let focus = &mut view.focus;
     let pad = u16::from(frame.area().height >= AIRY);
@@ -1161,7 +1165,7 @@ mod tests {
         let mut view = view();
         let agents = scan(&sessions());
         view.trees.expand_all(&agents);
-        view.collapse_all(&agents);
+        view.trees.collapse_all();
         let buf = draw_view((74, 16), sessions(), &mut view);
         assert!(!shows(&buf, "4124") && !shows(&buf, "5872"));
         view.trees.expand_all(&agents);
@@ -1199,7 +1203,7 @@ mod tests {
         draw_view((74, 16), sessions(), &mut view);
         view.focus.step(-1);
         draw_view((74, 16), sessions(), &mut view);
-        view.collapse_all(&agents);
+        view.trees.collapse_all();
         let buf = draw_view((74, 16), sessions(), &mut view);
         assert!(selected_line(&buf, &view.theme).unwrap().contains("5871"));
     }

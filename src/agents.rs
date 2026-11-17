@@ -21,7 +21,7 @@ const RUNTIMES: &[&str] = &["node", "bun", "deno", "python"];
 
 /// The process fields detection needs, copied out of sysinfo so detection
 /// runs on plain data.
-#[derive(Clone)]
+#[cfg_attr(test, derive(Clone))]
 pub struct ProcInfo {
     pub pid: Pid,
     pub parent: Option<Pid>,
