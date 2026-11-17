@@ -117,7 +117,12 @@ pub fn scan(procs: &HashMap<Pid, ProcInfo>, home: Option<&Path>) -> Vec<Agent> {
             }
         })
         .collect();
-    agents.sort_by_key(|a| a.procs[0].pid);
+    // busiest first; pid keeps idle sessions in a steady order
+    agents.sort_by(|a, b| {
+        b.cpu()
+            .total_cmp(&a.cpu())
+            .then(a.procs[0].pid.cmp(&b.procs[0].pid))
+    });
     agents
 }
 
@@ -368,6 +373,25 @@ mod tests {
             .map(|p| (p.pid.as_u32(), p.depth))
             .collect();
         assert_eq!(tree, [(10, 0), (11, 1), (12, 2)]);
+    }
+
+    #[test]
+    fn busiest_session_sorts_first() {
+        let busy = |(pid, mut info): (Pid, ProcInfo), cpu| {
+            info.cpu = cpu;
+            (pid, info)
+        };
+        let procs = HashMap::from([
+            proc(10, 1, 100, "claude"),
+            proc(20, 1, 200, "claude"),
+            busy(proc(21, 20, 201, "cargo"), 50.0),
+            proc(30, 1, 300, "codex"),
+        ]);
+        let roots: Vec<u32> = scan(&procs, home())
+            .iter()
+            .map(|a| a.procs[0].pid.as_u32())
+            .collect();
+        assert_eq!(roots, [20, 10, 30]);
     }
 
     #[test]
