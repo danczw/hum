@@ -263,22 +263,27 @@ fn argv_name(cmd: &[OsString]) -> Option<String> {
 /// on the same pid, see [`same_process`].
 pub fn read_session(config: &Path, pid: Pid) -> Option<String> {
     let file = fs::read_to_string(config.join("sessions").join(format!("{pid}.json"))).ok()?;
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    same_process(&file, &stat).then_some(file)
+    let stat = || fs::read_to_string(format!("/proc/{pid}/stat")).ok();
+    same_process(&file, stat).then_some(file)
 }
 
 /// False when the file's `procStart` differs from the start time in clock
 /// ticks in `/proc/<pid>/stat`, i.e. the file outlived its process and the
 /// pid was reused. Its `startedAt` is no guard: on a live session it read
-/// 223s after the process start. Files without `procStart` pass.
-fn same_process(file: &str, stat: &str) -> bool {
-    let Some(start) = top_level_str(file, "procStart") else {
-        return true;
+/// 223s after the process start. Files without `procStart` pass without
+/// reading `stat`; a `procStart` that is not a number fails.
+fn same_process(file: &str, stat: impl FnOnce() -> Option<String>) -> bool {
+    let start = match top_level(file, "procStart") {
+        None => return true,
+        Some(Field::Str(v) | Field::Raw(v)) => v.trim().parse::<u64>(),
     };
+    let Ok(start) = start else { return false };
     // starttime is field 22; fields 3 on follow the `)` that ends the comm
-    stat.rsplit_once(')')
-        .and_then(|(_, rest)| rest.split_whitespace().nth(19))
-        .is_some_and(|ticks| ticks == start)
+    stat().is_some_and(|stat| {
+        stat.rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().nth(19))
+            .is_some_and(|ticks| ticks.parse() == Ok(start))
+    })
 }
 
 /// Where [`read_session`] looks, from `$CLAUDE_CONFIG_DIR` and `$HOME`.
@@ -292,6 +297,20 @@ pub fn claude_config(config_dir: Option<OsString>, home: Option<&Path>) -> Optio
 /// objects and arrays. None when the key is missing, not a string, or the
 /// JSON does not parse up to it.
 fn top_level_str(json: &str, key: &str) -> Option<String> {
+    match top_level(json, key)? {
+        Field::Str(v) => Some(v),
+        Field::Raw(_) => None,
+    }
+}
+
+/// A top-level JSON value: a string unescaped, anything else as raw text.
+enum Field {
+    Str(String),
+    Raw(String),
+}
+
+/// The value of `key` in a JSON object's top level, see [`top_level_str`].
+fn top_level(json: &str, key: &str) -> Option<Field> {
     let mut chars = json.chars().peekable();
     let skip_ws = |chars: &mut Chars| while chars.next_if(|c| c.is_whitespace()).is_some() {};
     skip_ws(&mut chars);
@@ -305,13 +324,13 @@ fn top_level_str(json: &str, key: &str) -> Option<String> {
         if chars.peek() == Some(&'"') {
             let value = json_string(&mut chars)?;
             if k == key {
-                return Some(value);
+                return Some(Field::Str(value));
             }
         } else {
+            let value = skip_json_value(&mut chars)?;
             if k == key {
-                return None;
+                return Some(Field::Raw(value));
             }
-            skip_json_value(&mut chars)?;
         }
         skip_ws(&mut chars);
         chars.next_if_eq(&',')?;
@@ -345,24 +364,24 @@ fn json_string(chars: &mut Chars) -> Option<String> {
 }
 
 /// Skips a non-string JSON value, nested objects and arrays included, up to
-/// the `,` or `}` after it.
-fn skip_json_value(chars: &mut Chars) -> Option<()> {
+/// the `,` or `}` after it. Returns the text skipped outside nested strings,
+/// e.g. `12` for a number.
+fn skip_json_value(chars: &mut Chars) -> Option<String> {
     let mut depth = 0usize;
+    let mut raw = String::new();
     loop {
         match *chars.peek()? {
             '"' => {
                 json_string(chars)?;
             }
-            '{' | '[' => {
-                depth += 1;
-                chars.next();
-            }
-            ',' | '}' | ']' if depth == 0 => return Some(()),
-            '}' | ']' => {
-                depth -= 1;
-                chars.next();
-            }
-            _ => {
+            ',' | '}' | ']' if depth == 0 => return Some(raw),
+            c => {
+                match c {
+                    '{' | '[' => depth += 1,
+                    '}' | ']' => depth -= 1,
+                    _ => {}
+                }
+                raw.push(c);
                 chars.next();
             }
         }
@@ -1249,14 +1268,37 @@ mod tests {
     #[test]
     fn file_of_earlier_process_on_pid_is_stale() {
         let file = r#"{"cwd":"/home/u/code/hum","procStart":"1223063","name":"gate"}"#;
-        let stat = |start: u64| format!("81045 (claude) S 1 2 3 {} {start} 0", "0 ".repeat(15));
-        assert!(same_process(file, &stat(1223063)));
-        assert!(!same_process(file, &stat(1300000)));
-        assert!(!same_process(file, "garbage"));
-        assert!(same_process(r#"{"cwd":"/x"}"#, &stat(1)));
+        let stat = |start: u64| {
+            move || {
+                Some(format!(
+                    "81045 (claude) S 1 2 3 {} {start} 0",
+                    "0 ".repeat(15)
+                ))
+            }
+        };
+        assert!(same_process(file, stat(1223063)));
+        assert!(!same_process(file, stat(1300000)));
+        assert!(!same_process(file, || Some("garbage".into())));
+        // stat gone, e.g. the process exited
+        assert!(!same_process(file, || None));
         // a comm with spaces and parens
         let odd = format!("81045 (a) b) S 1 2 3 {} 1223063 0", "0 ".repeat(15));
-        assert!(same_process(file, &odd));
+        assert!(same_process(file, || Some(odd)));
+    }
+
+    #[test]
+    fn proc_start_as_number_or_garbage() {
+        let stat = || Some(format!("1 (claude) S 1 2 3 {} 1223063 0", "0 ".repeat(15)));
+        assert!(same_process(r#"{"procStart":1223063,"cwd":"/x"}"#, stat));
+        assert!(!same_process(r#"{"procStart":"soon"}"#, stat));
+        assert!(!same_process(r#"{"procStart":{"t":1223063}}"#, stat));
+        assert!(!same_process(r#"{"procStart":null}"#, stat));
+    }
+
+    #[test]
+    fn missing_proc_start_skips_stat() {
+        let stat = || -> Option<String> { panic!("stat read without procStart") };
+        assert!(same_process(r#"{"cwd":"/x"}"#, stat));
     }
 
     #[test]
