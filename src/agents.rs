@@ -106,10 +106,7 @@ impl Agent {
     /// The session as `<kind>/<project>`, e.g. `claude/hum`, or
     /// `claude/hum·gate` when it shares the project.
     pub fn label(&self) -> String {
-        tagged(
-            &format!("{}/{}", self.kind, self.project),
-            self.session.as_deref(),
-        )
+        tagged(&from(self.kind, &self.project), self.session.as_deref())
     }
 
     pub fn cpu(&self) -> f32 {
@@ -171,8 +168,13 @@ pub fn scan(
     agents
 }
 
+/// `<kind>/<project>`, the label of a session without its name.
+fn from(kind: &str, project: &str) -> String {
+    format!("{kind}/{project}")
+}
+
 /// `<base>·<session>`, or `base` alone without a session.
-fn tagged(base: &str, session: Option<&str>) -> String {
+pub fn tagged(base: &str, session: Option<&str>) -> String {
     match session {
         Some(s) => format!("{base}·{s}"),
         None => base.to_string(),
@@ -537,7 +539,7 @@ impl OrphanTracker {
 
         let mut current = HashSet::new();
         for agent in agents {
-            let from = format!("{}/{}", agent.kind, agent.project);
+            let from = from(agent.kind, &agent.project);
             for p in &agent.procs[1..] {
                 current.insert(p.pid);
                 let session = agent.session.clone();
@@ -631,7 +633,7 @@ impl EnvOrphans {
                 Some(Orphan {
                     pid: p.pid,
                     name: display_name(&p.name, &p.cmd),
-                    from: format!("{kind}/{project}"),
+                    from: from(kind, &project),
                     session,
                     start: p.start,
                     cpu: p.cpu,
