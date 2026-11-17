@@ -137,6 +137,10 @@ fn run(mut terminal: DefaultTerminal, app: &mut App, view: &mut View) -> io::Res
             last_tick = Instant::now();
             app.refresh();
             period = app.tick;
+            // a refresh slower than the tick restarts it, so hum still idles a full tick
+            if last_tick.elapsed() >= period {
+                last_tick = Instant::now();
+            }
         }
 
         terminal.draw(|frame| ui::draw(frame, app, view))?;
