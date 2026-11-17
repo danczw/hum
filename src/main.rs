@@ -43,7 +43,7 @@ impl App {
             home: agents::canonical_home(std::env::var_os("HOME")),
             ticks: 0,
             agents: Vec::new(),
-            busy: BusyTracker::default(),
+            busy: BusyTracker::new(agents::busy_window(TICK)),
             tracker: OrphanTracker::default(),
             env: EnvOrphans::new(Pid::from_u32(std::process::id())),
             orphans: Vec::new(),
