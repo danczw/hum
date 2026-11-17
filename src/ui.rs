@@ -854,7 +854,7 @@ const HELP: [&str; 14] = [
     "e c      expand, collapse all",
     "1        per-core cpu",
     "a        all or agent ports",
-    "Esc      close help/cursor, quit",
+    "Esc      close help/cursor or quit",
     "q        quit",
     "?        toggle this help",
 ];
