@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::time::Duration;
 
 pub const USAGE: &str = "\
@@ -21,13 +22,16 @@ pub enum Action {
 }
 
 /// Parses the arguments after the program name.
-pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Action, String> {
+pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Action, String> {
     let mut opts = Opts {
         interval: Duration::from_secs(1),
         agents: Vec::new(),
     };
-    let mut args = args.into_iter();
-    while let Some(arg) = args.next() {
+    let mut args = args.into_iter().map(|a| {
+        a.into_string()
+            .map_err(|a| format!("argument {} is not UTF-8", a.to_string_lossy()))
+    });
+    while let Some(arg) = args.next().transpose()? {
         let (flag, mut inline) = match arg.split_once('=') {
             Some((f, v)) if f.starts_with("--") => (f.to_owned(), Some(v.to_owned())),
             _ => (arg, None),
@@ -38,8 +42,9 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Action, String> {
         let mut value = || {
             inline
                 .take()
+                .map(Ok)
                 .or_else(|| args.next())
-                .ok_or_else(|| format!("{flag} needs a value"))
+                .unwrap_or_else(|| Err(format!("{flag} needs a value")))
         };
         match flag.as_str() {
             "-h" | "--help" => return Ok(Action::Help),
@@ -78,7 +83,7 @@ mod tests {
     use super::*;
 
     fn run(args: &[&str]) -> Result<Opts, String> {
-        match parse(args.iter().map(|a| a.to_string()))? {
+        match parse(args.iter().map(OsString::from))? {
             Action::Run(opts) => Ok(opts),
             _ => Err("not a run".into()),
         }
@@ -133,9 +138,18 @@ mod tests {
     }
 
     #[test]
+    fn non_utf8_argument_is_an_error() {
+        use std::os::unix::ffi::OsStringExt;
+        let bad = OsString::from_vec(vec![b'-', b'-', 0xff]);
+        assert!(parse([bad]).is_err());
+        let bad = OsString::from_vec(vec![0xff]);
+        assert!(parse([OsString::from("--agent"), bad]).is_err());
+    }
+
+    #[test]
     fn help_and_version_take_no_value() {
-        assert!(parse(["--help=x".to_string()]).is_err());
-        assert!(parse(["--version=x".to_string()]).is_err());
+        assert!(parse([OsString::from("--help=x")]).is_err());
+        assert!(parse([OsString::from("--version=x")]).is_err());
     }
 
     #[test]
@@ -148,7 +162,7 @@ mod tests {
 
     #[test]
     fn help_and_version() {
-        let action = |a: &str| parse([a.to_string()]).unwrap();
+        let action = |a: &str| parse([OsString::from(a)]).unwrap();
         assert!(matches!(action("-h"), Action::Help));
         assert!(matches!(action("--help"), Action::Help));
         assert!(matches!(action("-V"), Action::Version));
