@@ -615,10 +615,9 @@ fn draw_section(
 
 /// A section folded into the bottom border of a compact box:
 /// `╰ ports: 2 · :3000 node claude/hum  :5432 postgres ──╯`. Entries that do
-/// not fit are counted as `+N`. Its rows give up their cursor, so `Tab`
-/// passes over the section.
+/// not fit are counted as `+N`. `Tab` passes over the section.
 fn draw_footer(frame: &mut Frame, section: Section, area: Rect, theme: &Theme, focus: &mut Focus) {
-    focus.pane(section.pane).frame(Vec::new(), 0);
+    focus.pane(section.pane).hide();
     let mut spans = title(&section, false, theme);
     // corners, the closing space and at least one rule
     let mut room = usize::from(area.width).saturating_sub(Line::from(spans.clone()).width() + 4);
@@ -1047,6 +1046,23 @@ mod tests {
         view.focus.cycle(1);
         let buf = draw_view((74, 9), mockup(), &mut view);
         assert!(selected_line(&buf, &view.theme).unwrap().contains("4123"));
+    }
+
+    #[test]
+    fn folded_ports_keep_their_cursor() {
+        let mut view = view();
+        draw_view((74, 16), mockup(), &mut view);
+        view.focus.cycle(1);
+        view.focus.cycle(-1);
+        view.focus.step(1);
+        let buf = draw_view((74, 16), mockup(), &mut view);
+        assert!(selected_line(&buf, &view.theme).unwrap().contains(":5432"));
+        // folded, focus moves on to agents
+        draw_view((74, 9), mockup(), &mut view);
+        draw_view((74, 16), mockup(), &mut view);
+        view.focus.cycle(-1);
+        let buf = draw_view((74, 16), mockup(), &mut view);
+        assert!(selected_line(&buf, &view.theme).unwrap().contains(":5432"));
     }
 
     #[test]
