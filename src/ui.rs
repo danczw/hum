@@ -972,13 +972,7 @@ mod tests {
 
     /// Draws with every tree expanded.
     fn draw((width, height): (u16, u16), procs: Vec<(Pid, ProcInfo)>, theme: Theme) -> Buffer {
-        let mut view = View {
-            help: false,
-            cores: false,
-            theme,
-            focus: Focus::default(),
-            trees: Trees::default(),
-        };
+        let mut view = View { theme, ..view() };
         view.trees.expand_all(&scan(&procs));
         draw_view((width, height), procs, &mut view)
     }
@@ -1383,13 +1377,7 @@ mod tests {
     #[test]
     fn cursor_reaches_the_last_of_30_agent_rows_in_74x9() {
         let theme = Theme::ayu_mirage();
-        let mut view = View {
-            help: false,
-            cores: false,
-            theme,
-            focus: Focus::default(),
-            trees: Trees::default(),
-        };
+        let mut view = View { theme, ..view() };
         view.trees.expand_all(&scan(&big_tree(29)));
         draw_view((74, 9), big_tree(29), &mut view);
         view.focus.step(1);
@@ -1406,13 +1394,7 @@ mod tests {
     #[test]
     fn focused_section_keeps_a_line_for_its_cursor() {
         let theme = Theme::ayu_mirage();
-        let mut view = View {
-            help: false,
-            cores: false,
-            theme,
-            focus: Focus::default(),
-            trees: Trees::default(),
-        };
+        let mut view = View { theme, ..view() };
         view.trees.expand_all(&scan(&big_tree(29)));
         draw_view((74, 9), big_tree(29), &mut view);
         view.focus.cycle(1);
@@ -1425,13 +1407,7 @@ mod tests {
     fn short_panes_show_a_row_without_its_header() {
         let theme = Theme::ayu_mirage();
         for height in [8, 10] {
-            let mut view = View {
-                help: false,
-                cores: false,
-                theme,
-                focus: Focus::default(),
-                trees: Trees::default(),
-            };
+            let mut view = View { theme, ..view() };
             view.trees.expand_all(&scan(&big_tree(29)));
             draw_view((74, height), big_tree(29), &mut view);
             view.focus.cycle(1);
@@ -1453,13 +1429,7 @@ mod tests {
     #[test]
     fn cursor_stays_on_its_process_when_rows_reorder() {
         let theme = Theme::ayu_mirage();
-        let mut view = View {
-            help: false,
-            cores: false,
-            theme,
-            focus: Focus::default(),
-            trees: Trees::default(),
-        };
+        let mut view = View { theme, ..view() };
         draw_view((74, 16), mockup(), &mut view);
         view.focus.step(1);
         view.focus.step(1);
@@ -1475,13 +1445,7 @@ mod tests {
     #[test]
     fn tab_moves_the_cursor_to_orphans_and_leaves_agents() {
         let theme = Theme::ayu_mirage();
-        let mut view = View {
-            help: false,
-            cores: false,
-            theme,
-            focus: Focus::default(),
-            trees: Trees::default(),
-        };
+        let mut view = View { theme, ..view() };
         draw_view((74, 16), mockup(), &mut view);
         // the first Tab shows the cursor in agents
         view.focus.cycle(1);
@@ -1609,11 +1573,8 @@ mod tests {
     #[test]
     fn no_color_reverses_the_selected_row() {
         let mut view = View {
-            help: false,
-            cores: false,
             theme: Theme::no_color(),
-            focus: Focus::default(),
-            trees: Trees::default(),
+            ..view()
         };
         draw_view((74, 16), mockup(), &mut view);
         view.focus.step(1);
