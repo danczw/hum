@@ -804,7 +804,7 @@ mod tests {
         scan(&HashMap::from([(pid, info)]), home())
     }
 
-    /// The window of [`BusyTracker::default`].
+    /// Ticks the tests' tracker averages.
     const WINDOW: usize = 5;
 
     /// Feeds `ticks` samples of `cores` and returns whether the last one
@@ -820,14 +820,14 @@ mod tests {
 
     #[test]
     fn new_session_idle_until_window_fills() {
-        let mut busy = BusyTracker::default();
+        let mut busy = BusyTracker::new(WINDOW);
         assert!(!busy_after(&mut busy, WINDOW - 1, 1.0));
         assert!(busy_after(&mut busy, 1, 1.0));
     }
 
     #[test]
     fn quiet_session_turns_idle_within_window() {
-        let mut busy = BusyTracker::default();
+        let mut busy = BusyTracker::new(WINDOW);
         assert!(busy_after(&mut busy, WINDOW, 1.0));
         assert!(!busy_after(&mut busy, WINDOW, 0.0));
         assert!(!busy_after(&mut busy, WINDOW, BUSY_CORES));
@@ -835,7 +835,7 @@ mod tests {
 
     #[test]
     fn exited_session_drops_history() {
-        let mut busy = BusyTracker::default();
+        let mut busy = BusyTracker::new(WINDOW);
         busy_after(&mut busy, WINDOW, 1.0);
         busy.update(&mut []);
         assert!(busy.samples.is_empty());
@@ -843,7 +843,7 @@ mod tests {
 
     #[test]
     fn reused_pid_starts_fresh() {
-        let mut busy = BusyTracker::default();
+        let mut busy = BusyTracker::new(WINDOW);
         busy_after(&mut busy, WINDOW, 1.0);
         let mut agents = session(10, 500, 1.0);
         busy.update(&mut agents);
