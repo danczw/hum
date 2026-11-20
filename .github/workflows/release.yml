@@ -26,8 +26,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # Pull requests get the same checks from ci.yml directly.
-  ci:
+  # Pull requests get the same checks from ci.yml directly. Not named ci,
+  # since a skipped job of that name would count as the required check.
+  checks:
     needs: plan
     if: needs.plan.outputs.release == 'true'
     uses: ./.github/workflows/ci.yml
@@ -63,11 +64,11 @@ jobs:
           path: notes.md
 
   build:
-    needs: [ci, plan]
+    needs: [checks, plan]
     if: >-
       !cancelled() && needs.plan.result == 'success'
-      && ((needs.ci.result == 'success' && needs.plan.outputs.release == 'true')
-      || (needs.ci.result == 'skipped' && github.event_name == 'pull_request'))
+      && ((needs.checks.result == 'success' && needs.plan.outputs.release == 'true')
+      || (needs.checks.result == 'skipped' && github.event_name == 'pull_request'))
     runs-on: ubuntu-latest
     strategy:
       matrix:
