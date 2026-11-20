@@ -4,6 +4,8 @@
 
 A small terminal monitor for machines running coding agents. Built with [ratatui](https://ratatui.rs) and [sysinfo](https://crates.io/crates/sysinfo). Linux only.
 
+![hum watching one Claude Code session. The agent idles with an empty circle, an orphaned sleep process appears, a Python server under the agent opens port 8765, then a shell loop uses a full core and the agent's circle fills.](assets/demo.gif)
+
 - CPU, memory and swap
 - Agents (claude, codex, aider, gemini, ...) with their process trees, marked `●` while busy and `○` while idle
 - Listening TCP ports of agents and orphans, tagged with their owner. A `*` after the port (`:3000*`) marks a bind to a non-loopback address such as `0.0.0.0`; `a` shows every port
