@@ -1,0 +1,19 @@
+# Linux packages for .github/workflows/release.yml. Expects VERSION, ARCH
+# (nfpm's GOARCH-style name) and the binary at stage/hum.
+name: hum
+version: ${VERSION}
+arch: ${ARCH}
+platform: linux
+maintainer: danczw <github.cdx7q@dcx.cx>
+description: Terminal monitor for machines running coding agents
+homepage: https://github.com/danczw/hum
+license: Apache-2.0
+contents:
+  - src: stage/hum
+    dst: /usr/bin/hum
+    file_info:
+      mode: 0755
+  - src: LICENSE
+    dst: /usr/share/licenses/hum/LICENSE
+  - src: README.md
+    dst: /usr/share/doc/hum/README.md

@@ -1,0 +1,223 @@
+name: Release
+
+# Every push to main with a feat, fix or perf commit since the last tag
+# releases the next version from cliff.toml. Pull requests that touch the
+# code or the release files run everything up to publishing, as a dry run.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - src/**
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/release.yml
+      - .github/workflows/ci.yml
+      - cliff.toml
+      - install.sh
+      - packaging/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Pull requests get the same checks from ci.yml directly. Not named ci,
+  # since a skipped job of that name would count as the required check.
+  checks:
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
+    uses: ./.github/workflows/ci.yml
+
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release: ${{ steps.version.outputs.release }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: git-cliff@2.14.2
+      # git-cliff returns the last tag when no commit since it bumps.
+      - id: version
+        run: |
+          next=$(git-cliff --bumped-version)
+          last=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)
+          release=false
+          if [ "$next" != "$last" ] && [ "$GITHUB_EVENT_NAME" != pull_request ] && [ "$GITHUB_REF" = refs/heads/main ]; then
+            release=true
+          fi
+          git-cliff --unreleased --tag "$next" --strip all > notes.md
+          echo "version=${next#v}" >> "$GITHUB_OUTPUT"
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "last ${last:-none}, next $next, release $release" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: notes
+          path: notes.md
+
+  build:
+    needs: [checks, plan]
+    if: >-
+      !cancelled() && needs.plan.result == 'success'
+      && ((needs.checks.result == 'success' && needs.plan.outputs.release == 'true')
+      || (needs.checks.result == 'skipped' && github.event_name == 'pull_request'))
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # arch is nfpm's name. The armhf .deb comes from the armv6 build,
+        # which Raspberry Pi OS and Debian armhf both run.
+        include:
+          - { target: x86_64-unknown-linux-musl, arch: amd64, formats: deb rpm apk archlinux }
+          - { target: i686-unknown-linux-musl, arch: "386", formats: deb rpm apk archlinux }
+          - { target: aarch64-unknown-linux-musl, arch: arm64, qemu: aarch64, formats: deb rpm apk archlinux }
+          - { target: armv7-unknown-linux-musleabihf, arch: arm7, qemu: arm, formats: rpm apk archlinux }
+          - { target: arm-unknown-linux-musleabihf, arch: arm6, qemu: arm, formats: deb rpm apk archlinux }
+          - { target: riscv64gc-unknown-linux-musl, arch: riscv64, qemu: riscv64, formats: deb rpm apk archlinux }
+          - { target: powerpc64le-unknown-linux-musl, arch: ppc64le, qemu: ppc64le, formats: deb rpm apk archlinux }
+          - { target: loongarch64-unknown-linux-musl, arch: loong64, qemu: loongarch64, formats: deb rpm apk archlinux }
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.plan.outputs.version }}
+      QEMU: ${{ matrix.qemu }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.target }}
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: cargo-zigbuild@0.24.1
+      # cargo-zigbuild falls back to `python3 -m ziglang` when zig is not on PATH.
+      - run: |
+          python3 -m venv "$RUNNER_TEMP/zig"
+          "$RUNNER_TEMP/zig/bin/pip" install --quiet ziglang==0.17.1
+          echo "$RUNNER_TEMP/zig/bin" >> "$GITHUB_PATH"
+      - if: matrix.qemu
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-user
+      - name: Set version
+        run: |
+          sed -i "s/^version = \"0.0.0-dev\"$/version = \"$VERSION\"/" Cargo.toml Cargo.lock
+          grep -q "^version = \"$VERSION\"$" Cargo.toml
+      # The ci job already ran the tests natively on x86_64.
+      - name: Test
+        if: matrix.target != 'x86_64-unknown-linux-musl'
+        run: |
+          if [ -n "$QEMU" ]; then
+            export "CARGO_TARGET_$(echo "$TARGET" | tr a-z- A-Z_)_RUNNER=qemu-$QEMU"
+          fi
+          cargo-zigbuild test --locked --target "$TARGET"
+      - name: Build
+        run: cargo zigbuild --release --locked --target "$TARGET"
+      - name: Check binary
+        run: |
+          bin=target/$TARGET/release/hum
+          file -b "$bin" | grep -Eq 'static(-pie|ally) linked'
+          got=$(${QEMU:+qemu-$QEMU} "$bin" --version)
+          [ "$got" = "hum $VERSION" ] || { echo "got '$got', want 'hum $VERSION'"; exit 1; }
+      - name: Archive
+        run: |
+          mkdir -p stage dist
+          cp "target/$TARGET/release/hum" LICENSE README.md stage/
+          tar -czf "dist/hum-$TARGET.tar.gz" -C stage hum LICENSE README.md
+      - name: Install nfpm
+        run: |
+          curl -fsSLo nfpm.tar.gz https://github.com/goreleaser/nfpm/releases/download/v2.49.0/nfpm_2.49.0_Linux_x86_64.tar.gz
+          echo "2afaa5ffb5e3493402e31e7c67a5a1fb42133e3f66fc315ca0051934125561c7  nfpm.tar.gz" | sha256sum -c
+          tar -xzf nfpm.tar.gz -C "$RUNNER_TEMP" nfpm
+      - name: Package
+        env:
+          ARCH: ${{ matrix.arch }}
+          FORMATS: ${{ matrix.formats }}
+        run: |
+          for format in $FORMATS; do
+            "$RUNNER_TEMP/nfpm" package -f packaging/nfpm.yaml -p "$format" -t dist/
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: [plan, build]
+    if: needs.plan.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: notes
+      - run: |
+          cp install.sh dist/
+          cd dist && sha256sum -- hum* install.sh > SHA256SUMS
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/*
+      # The tag is created here, on the commit that was tested and built.
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "v$VERSION" dist/* --target "$GITHUB_SHA" --title "v$VERSION" --notes-file notes.md
+
+  homebrew:
+    needs: [plan, publish]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: danczw/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      - name: Render formula
+        run: |
+          sum() { sha256sum "dist/hum-$1-unknown-linux-musl.tar.gz" | cut -d' ' -f1; }
+          mkdir -p tap/Formula
+          sed -e '1,2d' \
+            -e "s/@VERSION@/$VERSION/g" \
+            -e "s/@SHA256_X86_64@/$(sum x86_64)/" \
+            -e "s/@SHA256_AARCH64@/$(sum aarch64)/" \
+            packaging/hum.rb > tap/Formula/hum.rb
+          git -C tap add Formula/hum.rb
+          git -C tap diff --cached --quiet || git -C tap \
+            -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -m "hum $VERSION"
+      - uses: Homebrew/actions/setup-homebrew@ceec4e8419bb3c97ce96e9dda7738499ed5f869d # 2026.11.14.1
+      # Tap the local checkout so the formula is tested before it is pushed.
+      - run: |
+          brew tap danczw/tap "$PWD/tap"
+          brew install danczw/tap/hum
+          brew test danczw/tap/hum
+      - run: git -C tap push
