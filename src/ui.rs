@@ -10,7 +10,7 @@ use sysinfo::Pid;
 
 use crate::App;
 use crate::agents::{self, Agent, Orphan};
-use crate::focus::{self, Focus, Key, key};
+use crate::focus::{self, Focus, Key, key, subagent_key};
 use crate::theme::Theme;
 use crate::trees::{self, Trees};
 
@@ -118,7 +118,7 @@ impl View {
         match fold {
             Fold::Collapse if at != root => self.focus.select(focus::AGENTS, root),
             // kept closed, so children spawned later start collapsed
-            _ if agent.procs.len() == 1 => {}
+            _ if !agent.has_children() => {}
             Fold::Toggle => self.trees.toggle(root),
             Fold::Expand => self.trees.expand(root),
             Fold::Collapse => self.trees.collapse(root),
@@ -434,11 +434,12 @@ fn agents_section(agents: &[Agent], trees: &Trees, width: u16, theme: &Theme) ->
     for agent in agents {
         let root = &agent.procs[0];
         let kids = &agent.procs[1..];
+        let children = kids.len() + agent.subagents.len();
         let root_key = trees::root(agent);
         let open = trees.is_open(root_key);
         // `▸ ● claude (14)` collapsed, `▾ ● claude` open; a long kind is cut
         // before the count
-        let (marker, count) = match kids.len() {
+        let (marker, count) = match children {
             0 => (' ', String::new()),
             _ if open => ('▾', String::new()),
             n => ('▸', format!(" ({n})")),
@@ -477,6 +478,22 @@ fn agents_section(agents: &[Agent], trees: &Trees, width: u16, theme: &Theme) ->
         keys.push(root_key);
         if !open {
             continue;
+        }
+        // above the processes, which can be many servers that would push
+        // them out of a short pane. One level deep: a meta file does not
+        // name the subagent that started it.
+        for s in &agent.subagents {
+            rows.push(Row::new(columns(
+                [
+                    Cell::from(cut(&format!("    ◇ {}", s.kind), process_max)),
+                    Cell::from(""),
+                    Cell::from(""),
+                    Cell::from(""),
+                    Cell::from(""),
+                ],
+                cores,
+            )));
+            keys.push(subagent_key(&s.id));
         }
         for p in kids {
             rows.push(Row::new(columns(
@@ -1073,7 +1090,7 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::style::{Color, Modifier};
 
-    use crate::agents::{self, BusyTracker, ProcInfo};
+    use crate::agents::{self, BusyTracker, ProcInfo, Subagent};
     use crate::focus::Focus;
 
     const GIB: u64 = 1024 * 1024 * 1024;
@@ -1792,6 +1809,80 @@ mod tests {
             child_proc(5872, 5871, "bash"),
         ]);
         procs
+    }
+
+    /// [`sessions`] with two subagents under the hum session.
+    fn with_subagents() -> Vec<Agent> {
+        let mut agents = scan(&sessions());
+        agents[0].subagents = vec![
+            Subagent {
+                id: "a1".into(),
+                kind: "Explore".into(),
+            },
+            Subagent {
+                id: "a2".into(),
+                kind: "code-review".into(),
+            },
+        ];
+        agents
+    }
+
+    #[test]
+    fn subagents_show_above_the_processes_of_their_agent() {
+        let agents = with_subagents();
+        let mut view = view();
+        let buf = draw_agents((74, 16), &agents, eight_cores(), &mut view);
+        let lines = text(&buf);
+        assert!(lines[4].starts_with("│ ▸ ○ claude (4) "), "{lines:#?}");
+        view.trees.expand_all(&agents);
+        let lines = text(&draw_agents((74, 16), &agents, eight_cores(), &mut view));
+        assert!(lines[5].starts_with("│     ◇ Explore  "), "{lines:#?}");
+        assert!(lines[6].starts_with("│     ◇ code-review  "), "{lines:#?}");
+        assert!(lines[7].starts_with("│     └ bash "), "{lines:#?}");
+        // no pid, cores or mem of its own
+        assert!(
+            lines[5].trim_end_matches([' ', '│']).ends_with("Explore"),
+            "{lines:#?}"
+        );
+    }
+
+    #[test]
+    fn subagents_fit_the_glance_pane() {
+        let agents = with_subagents();
+        let mut view = view();
+        view.trees.expand_all(&agents);
+        let lines = text(&draw_agents((74, 10), &agents, eight_cores(), &mut view));
+        assert!(lines.iter().any(|l| l.contains("◇ Explore")), "{lines:#?}");
+    }
+
+    #[test]
+    fn a_session_with_only_subagents_expands() {
+        let mut agents = scan(&mockup());
+        agents[0].subagents = with_subagents().remove(0).subagents;
+        let mut view = view();
+        view.trees.expand_all(&agents);
+        let lines = text(&draw_agents((74, 16), &agents, eight_cores(), &mut view));
+        assert!(lines[4].starts_with("│ ▾ ○ claude "), "{lines:#?}");
+        assert!(lines[5].starts_with("│     ◇ Explore "), "{lines:#?}");
+    }
+
+    #[test]
+    fn collapse_on_a_subagent_moves_the_cursor_to_its_root() {
+        let agents = with_subagents();
+        let mut view = view();
+        view.trees.expand_all(&agents);
+        draw_agents((74, 16), &agents, eight_cores(), &mut view);
+        view.focus.step(1);
+        view.focus.step(1);
+        let buf = draw_agents((74, 16), &agents, eight_cores(), &mut view);
+        assert!(
+            selected_line(&buf, &view.theme)
+                .unwrap()
+                .contains("Explore")
+        );
+        view.fold(&agents, Fold::Collapse);
+        let buf = draw_agents((74, 16), &agents, eight_cores(), &mut view);
+        assert!(selected_line(&buf, &view.theme).unwrap().contains("4123"));
     }
 
     fn view() -> View {

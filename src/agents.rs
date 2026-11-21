@@ -3,7 +3,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use sysinfo::{Pid, Process, System};
 
@@ -42,6 +42,11 @@ type Marker = (&'static str, Pid);
 /// Span of tree cpu averaged to call a session busy, for agents without a
 /// reported status, see [`Agent::reported`].
 const BUSY_SPAN: Duration = Duration::from_secs(5);
+/// How long a subagent's transcript may go unwritten before it counts as
+/// stopped, see [`running_subagents`]. A minute past Claude Code's longest
+/// Bash timeout, 10 minutes, so a subagent waiting on one command stays
+/// listed.
+const SUBAGENT_QUIET: Duration = Duration::from_secs(660);
 /// Mean tree cpu, in cores, above which a session counts as busy. A claude
 /// session idle at its prompt measured 0.006 to 0.024, one waiting on a tool
 /// 0.04 to 0.07.
@@ -105,6 +110,19 @@ pub struct Agent {
     /// Tells apart agents of the same kind and project, see [`name_sessions`];
     /// None when the agent is the only one.
     pub session: Option<String>,
+    /// Claude Code's `sessionId` from the session file, which names the
+    /// directory of its subagents.
+    pub session_id: Option<String>,
+    /// Set from [`running_subagents`]; empty for other agents.
+    pub subagents: Vec<Subagent>,
+}
+
+/// A subagent Claude Code runs inside its own process, so it has no pid.
+pub struct Subagent {
+    /// The `<id>` in `agent-<id>.meta.json`.
+    pub id: String,
+    /// The meta file's `name`, else its `agentType`, e.g. `Explore`.
+    pub kind: String,
 }
 
 impl Agent {
@@ -114,6 +132,11 @@ impl Agent {
 
     pub fn mem(&self) -> u64 {
         self.procs.iter().map(|p| p.mem).sum()
+    }
+
+    /// Whether the tree has rows below the agent: processes or subagents.
+    pub fn has_children(&self) -> bool {
+        self.procs.len() > 1 || !self.subagents.is_empty()
     }
 }
 
@@ -155,6 +178,8 @@ pub fn scan(
                 busy: false,
                 reported: None,
                 session: None,
+                session_id: None,
+                subagents: Vec::new(),
             }
         })
         .collect();
@@ -167,6 +192,7 @@ pub fn scan(
         .collect();
     for (agent, file) in agents.iter_mut().zip(&files) {
         agent.reported = file.as_deref().and_then(reported_busy);
+        agent.session_id = file.as_deref().and_then(|f| top_level_str(f, "sessionId"));
     }
     name_sessions(procs, &mut agents, &files);
     agents
@@ -311,6 +337,103 @@ fn same_process(file: &str, stat: impl FnOnce() -> Option<String>) -> bool {
             .and_then(|(_, rest)| rest.split_whitespace().nth(19))
             .is_some_and(|ticks| ticks.parse() == Ok(start))
     })
+}
+
+/// Subagents still running in Claude Code session `session` at `cwd`,
+/// oldest first. Claude Code keeps each one's `agent-<id>.meta.json` and
+/// transcript `agent-<id>.jsonl` under `projects/<cwd>/<session>/subagents`,
+/// and adds `"finished":true` to the meta when it ends, but not when it is
+/// stopped. So one counts as running only while its transcript changed
+/// within [`SUBAGENT_QUIET`] of `now`.
+pub fn running_subagents(
+    config: &Path,
+    cwd: Option<&Path>,
+    session: &str,
+    now: SystemTime,
+) -> Vec<Subagent> {
+    // the id comes from a file and ends up in a path
+    if session.is_empty() || !session.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+        return Vec::new();
+    }
+    let projects = config.join("projects");
+    let in_project = |p: &Path| p.join(session).join("subagents");
+    // Claude Code names long paths differently, so the dirs are searched
+    // when the name misses
+    let named = cwd.map(|cwd| projects.join(project_dir(cwd)));
+    // the subagents dir appears with the first subagent, so only a missing
+    // project dir means the name missed
+    let Some(dir) = named
+        .filter(|p| p.is_dir())
+        .map(|p| in_project(&p))
+        .or_else(|| {
+            fs::read_dir(&projects)
+                .ok()?
+                .filter_map(Result::ok)
+                .map(|p| in_project(&p.path()))
+                .find(|d| d.is_dir())
+        })
+    else {
+        return Vec::new();
+    };
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let quiet_since = now
+        .checked_sub(SUBAGENT_QUIET)
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let mut found: Vec<(SystemTime, Subagent)> = entries
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            let name = e.file_name();
+            let id = name
+                .to_str()?
+                .strip_prefix("agent-")?
+                .strip_suffix(".meta.json")?;
+            let meta = e.metadata().ok()?;
+            // checked before the meta is read, so subagents that ended long
+            // ago cost two stats each; a transcript not yet created counts as
+            // written with the meta
+            let written = fs::metadata(dir.join(format!("agent-{id}.jsonl")))
+                .and_then(|t| t.modified())
+                .or_else(|_| meta.modified())
+                .ok()?;
+            if written < quiet_since {
+                return None;
+            }
+            // its mtime moves when the subagent finishes, its birth time not
+            let started = meta.created().or_else(|_| meta.modified()).ok()?;
+            let kind = subagent(&fs::read_to_string(e.path()).ok()?)?;
+            let id = id.to_string();
+            Some((started, Subagent { id, kind }))
+        })
+        .collect();
+    found.sort_by(|(a, x), (b, y)| a.cmp(b).then_with(|| x.id.cmp(&y.id)));
+    found.into_iter().map(|(_, s)| s).collect()
+}
+
+/// The name of Claude Code's project dir for `cwd`: each UTF-16 unit but
+/// ASCII letters and digits as `-`, as its JavaScript counts them.
+fn project_dir(cwd: &Path) -> String {
+    let mut name = String::new();
+    for c in cwd.to_string_lossy().chars() {
+        match c.is_ascii_alphanumeric() {
+            true => name.push(c),
+            false => name.extend(std::iter::repeat_n('-', c.len_utf16())),
+        }
+    }
+    name
+}
+
+/// A subagent meta file's kind, see [`Subagent`]. None once it finished,
+/// or when it names no kind.
+fn subagent(meta: &str) -> Option<String> {
+    if let Some(Field::Raw(v)) = top_level(meta, "finished")
+        && v.trim() == "true"
+    {
+        return None;
+    }
+    let named = |key| top_level_str(meta, key).filter(|n| !n.is_empty());
+    named("name").or_else(|| named("agentType"))
 }
 
 /// Where [`read_session`] looks, from `$CLAUDE_CONFIG_DIR` and `$HOME`.
@@ -1440,6 +1563,112 @@ mod tests {
             tagged(&orphans[0].from, orphans[0].session.as_deref()),
             "claude/hum·exec"
         );
+    }
+
+    #[test]
+    fn meta_names_a_running_subagent() {
+        let meta = r#"{"agentType":"Explore","description":"x","spawnDepth":1}"#;
+        assert_eq!(subagent(meta).as_deref(), Some("Explore"));
+        let named = r#"{"agentType":"general-purpose","name":"code-review"}"#;
+        assert_eq!(subagent(named).as_deref(), Some("code-review"));
+    }
+
+    #[test]
+    fn finished_or_garbage_meta_is_no_subagent() {
+        let meta = r#"{"agentType":"Explore","spawnDepth":1,"finished":true}"#;
+        assert_eq!(subagent(meta), None);
+        let meta = r#"{"agentType":"Explore","finished":false}"#;
+        assert!(subagent(meta).is_some());
+        assert_eq!(subagent("{not json"), None);
+        assert_eq!(subagent(r#"{"agentType":""}"#), None);
+    }
+
+    /// A config dir with session `5e55` in the project of cwd `/x/hum`,
+    /// holding `subagents` as (id, meta, seconds since its transcript was
+    /// written), metas written in order. Returns the dir and now.
+    fn subagent_dir(name: &str, subagents: &[(&str, &str, u64)]) -> (PathBuf, SystemTime) {
+        let config = std::env::temp_dir().join(format!("hum-{name}-{}", std::process::id()));
+        let dir = config.join("projects/-x-hum/5e55/subagents");
+        fs::create_dir_all(&dir).unwrap();
+        let now = SystemTime::now();
+        for &(id, meta, quiet) in subagents {
+            // past the kernel's coarse file timestamps, so start times differ
+            std::thread::sleep(Duration::from_millis(20));
+            fs::write(dir.join(format!("agent-{id}.meta.json")), meta).unwrap();
+            let transcript = dir.join(format!("agent-{id}.jsonl"));
+            let file = fs::File::create(&transcript).unwrap();
+            file.set_modified(now - Duration::from_secs(quiet)).unwrap();
+        }
+        (config, now)
+    }
+
+    fn kinds(found: &[Subagent]) -> Vec<(&str, &str)> {
+        found
+            .iter()
+            .map(|s| (s.id.as_str(), s.kind.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn running_subagents_in_start_order() {
+        let (config, now) = subagent_dir(
+            "subagents",
+            &[
+                ("a2", r#"{"agentType":"Explore"}"#, 0),
+                ("a1", r#"{"agentType":"Plan"}"#, 650),
+                ("a3", r#"{"agentType":"Explore","finished":true}"#, 0),
+                // stopped: Claude Code never marks it finished
+                ("a0", r#"{"agentType":"Explore"}"#, 670),
+            ],
+        );
+        let cwd = Some(Path::new("/x/hum"));
+        let found = running_subagents(&config, cwd, "5e55", now);
+        // a cwd whose project dir name differs is searched for
+        let searched = running_subagents(&config, Some(Path::new("/y")), "5e55", now);
+        let missing = running_subagents(&config, cwd, "beef", now);
+        fs::remove_dir_all(&config).unwrap();
+        assert_eq!(kinds(&found), [("a2", "Explore"), ("a1", "Plan")]);
+        assert_eq!(kinds(&searched), kinds(&found));
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn subagent_without_a_transcript_yet_is_running() {
+        let (config, now) = subagent_dir("fresh", &[]);
+        let dir = config.join("projects/-x-hum/5e55/subagents");
+        fs::write(dir.join("agent-a1.meta.json"), r#"{"agentType":"Explore"}"#).unwrap();
+        let found = running_subagents(&config, Some(Path::new("/x/hum")), "5e55", now);
+        fs::remove_dir_all(&config).unwrap();
+        assert_eq!(kinds(&found), [("a1", "Explore")]);
+    }
+
+    #[test]
+    fn project_dir_counts_utf16_units() {
+        assert_eq!(
+            project_dir(Path::new("/home/u/code/hum")),
+            "-home-u-code-hum"
+        );
+        assert_eq!(project_dir(Path::new("/a.b/é/😀")), "-a-b-----");
+    }
+
+    #[test]
+    fn session_id_must_be_a_plain_id() {
+        let (config, now) = subagent_dir("escape", &[("a1", r#"{"agentType":"Explore"}"#, 0)]);
+        let cwd = Some(Path::new("/x/hum"));
+        // resolves to the same dir, but a session file could point anywhere
+        let dotted = running_subagents(&config, cwd, "5e55/../5e55", now);
+        let plain = running_subagents(&config, cwd, "5e55", now);
+        fs::remove_dir_all(&config).unwrap();
+        assert!(dotted.is_empty());
+        assert_eq!(plain.len(), 1);
+    }
+
+    #[test]
+    fn session_id_comes_from_the_session_file() {
+        let (pid, info) = in_dir(proc(10, 1, 100, "claude"), HUM);
+        let file = r#"{"cwd":"/home/u/code/hum","sessionId":"14b4-39b0"}"#;
+        let agents = scan(&HashMap::from([(pid, info)]), home(), files(&[(10, file)]));
+        assert_eq!(agents[0].session_id.as_deref(), Some("14b4-39b0"));
     }
 
     #[test]

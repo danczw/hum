@@ -9,7 +9,7 @@ mod ui;
 use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -84,6 +84,15 @@ impl App {
         self.agents = agents::scan(&procs, self.home.as_deref(), |pid| {
             agents::read_session(claude?, pid)
         });
+        if let Some(claude) = claude {
+            let now = SystemTime::now();
+            for agent in &mut self.agents {
+                if let Some(id) = &agent.session_id {
+                    let cwd = procs[&agent.procs[0].pid].cwd.as_deref();
+                    agent.subagents = agents::running_subagents(claude, cwd, id, now);
+                }
+            }
+        }
         self.busy.update(&mut self.agents);
         let home = self.home.as_deref();
         self.orphans = agents::merge(
