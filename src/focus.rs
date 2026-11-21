@@ -1,11 +1,22 @@
+use std::hash::{DefaultHasher, Hash, Hasher};
+
 use sysinfo::Pid;
 
 /// Names a row across ticks so the cursor follows it when rows reorder:
-/// `(pid, start time)` for processes, `(port, pid)` for ports.
+/// `(pid, start time)` for processes, `(port, pid)` for ports, see
+/// [`subagent_key`] for subagents.
 pub type Key = (u64, u64);
 
 pub fn key(pid: Pid, start: u64) -> Key {
     (pid.as_u32().into(), start)
+}
+
+/// `(u64::MAX, hash of the id)`: no pid reaches `u64::MAX`, so it never
+/// names a process.
+pub fn subagent_key(id: &str) -> Key {
+    let mut hasher = DefaultHasher::new();
+    id.hash(&mut hasher);
+    (u64::MAX, hasher.finish())
 }
 
 /// Sections in the order `Tab` cycles through.

@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::agents::Agent;
-use crate::focus::{Key, key};
+use crate::focus::{Key, key, subagent_key};
 
 /// Which agent trees show their descendants, by root process. Only expanded
 /// roots are kept, so a new session starts collapsed.
@@ -33,7 +33,7 @@ impl Trees {
     /// collapsed.
     pub fn expand_all(&mut self, agents: &[Agent]) {
         self.open
-            .extend(agents.iter().filter(|a| a.procs.len() > 1).map(root));
+            .extend(agents.iter().filter(|a| a.has_children()).map(root));
     }
 
     pub fn collapse_all(&mut self) {
@@ -45,7 +45,7 @@ impl Trees {
     pub fn retain(&mut self, agents: &[Agent]) {
         let roots: HashSet<Key> = agents
             .iter()
-            .filter(|a| a.procs.len() > 1)
+            .filter(|a| a.has_children())
             .map(root)
             .collect();
         self.open.retain(|k| roots.contains(k));
@@ -57,11 +57,12 @@ pub fn root(agent: &Agent) -> Key {
     key(p.pid, p.start)
 }
 
-/// The session whose tree holds the process `of`.
+/// The session whose tree holds the process or subagent `of`.
 pub fn tree_of(agents: &[Agent], of: Key) -> Option<&Agent> {
-    agents
-        .iter()
-        .find(|a| a.procs.iter().any(|p| key(p.pid, p.start) == of))
+    agents.iter().find(|a| {
+        a.procs.iter().any(|p| key(p.pid, p.start) == of)
+            || a.subagents.iter().any(|s| subagent_key(&s.id) == of)
+    })
 }
 
 #[cfg(test)]
@@ -69,7 +70,7 @@ mod tests {
     use sysinfo::Pid;
 
     use super::*;
-    use crate::agents::Proc;
+    use crate::agents::{Proc, Subagent};
 
     /// A session per root pid, each with one child at `root + 1`.
     fn agents(roots: &[u32]) -> Vec<Agent> {
@@ -90,6 +91,8 @@ mod tests {
                 busy: false,
                 reported: None,
                 session: None,
+                session_id: None,
+                subagents: Vec::new(),
             })
             .collect()
     }
@@ -142,6 +145,38 @@ mod tests {
         let child = key(Pid::from_u32(21), 7);
         assert_eq!(tree_of(&now, child).map(root), Some(root(&now[1])));
         assert!(tree_of(&now, key(Pid::from_u32(21), 8)).is_none());
+    }
+
+    fn subagent(id: &str) -> Subagent {
+        Subagent {
+            id: id.into(),
+            kind: "Explore".into(),
+        }
+    }
+
+    #[test]
+    fn subagents_alone_keep_a_tree_open() {
+        let mut trees = Trees::default();
+        let mut now = agents(&[10]);
+        now[0].procs.truncate(1);
+        now[0].subagents.push(subagent("a1"));
+        trees.expand_all(&now);
+        trees.retain(&now);
+        assert!(trees.is_open(root(&now[0])));
+        now[0].subagents.clear();
+        trees.retain(&now);
+        assert!(!trees.is_open(root(&now[0])));
+    }
+
+    #[test]
+    fn tree_of_finds_the_session_of_a_subagent() {
+        let mut now = agents(&[10, 20]);
+        now[1].subagents.push(subagent("a1"));
+        assert_eq!(
+            tree_of(&now, subagent_key("a1")).map(root),
+            Some(root(&now[1]))
+        );
+        assert!(tree_of(&now, subagent_key("a2")).is_none());
     }
 
     #[test]
