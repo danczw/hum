@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime};
 use sysinfo::{Pid, System};
 
 use crate::focus::{Key, key};
-use crate::label::Label;
+use crate::label::{Label, cut};
 
 /// Process names that mark the root of an agent session.
 const AGENTS: &[&str] = &[
@@ -660,9 +660,10 @@ impl Owner {
     const ORPHAN: &str = "orphan:";
 
     /// Up to `max` chars; a cut shortens the label and keeps `orphan:`
-    /// whole.
+    /// whole while it fits.
     pub fn fit(&self, max: usize) -> String {
         match self.orphan {
+            true if max <= Self::ORPHAN.len() => cut(Self::ORPHAN, max),
             true => {
                 let room = max.saturating_sub(Self::ORPHAN.len());
                 format!("{}{}", Self::ORPHAN, self.label.fit(room))
@@ -1271,6 +1272,8 @@ mod tests {
         let tag = |pid, start| owner(pid, start).map(|o| o.to_string());
         assert_eq!(tag(11, 101).as_deref(), Some("claude/hum"));
         assert_eq!(tag(12, 102).as_deref(), Some("orphan:claude/hum"));
+        // a column narrower than `orphan:` cuts it too
+        assert_eq!(owner(12, 102).unwrap().fit(5), "orph…");
         // the pids were reused by processes started later
         assert_eq!(owner(11, 500), None);
         assert_eq!(owner(12, 500), None);
