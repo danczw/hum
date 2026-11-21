@@ -4,11 +4,11 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use sysinfo::{Pid, System};
 
-use crate::claude::{Name, SessionFile, SessionId, Subagent};
+use crate::claude::{self, Name, SessionFile, SessionId, Subagent};
 use crate::focus::{Key, key};
 use crate::label::{Label, cut};
 
@@ -109,7 +109,7 @@ pub struct Agent {
     /// None when the agent is the only one.
     pub session: Option<String>,
     pub session_id: Option<SessionId>,
-    /// Set from [`crate::claude::running_subagents`]; empty for other agents.
+    /// Set from [`claude::running_subagents`]; empty for other agents.
     pub subagents: Vec<Subagent>,
 }
 
@@ -137,7 +137,7 @@ impl Agent {
 }
 
 /// `read_session` returns a claude pid's session file, see
-/// [`crate::claude::read_session`].
+/// [`claude::read_session`].
 pub fn scan(
     procs: &HashMap<Pid, ProcInfo>,
     home: Option<&Path>,
@@ -551,7 +551,7 @@ impl EnvOrphans {
     }
 }
 
-pub fn read_environ(pid: Pid) -> Option<Vec<u8>> {
+fn read_environ(pid: Pid) -> Option<Vec<u8>> {
     fs::read(format!("/proc/{pid}/environ")).ok()
 }
 
@@ -586,7 +586,7 @@ pub fn owner(agents: &[Agent], orphans: &[Orphan], pid: Pid, start: u64) -> Opti
 
 /// Joins both orphan lists by pid. The tracker's entry wins: it keeps the
 /// project after the agent exits.
-pub fn merge(mut tracked: Vec<Orphan>, env: Vec<Orphan>) -> Vec<Orphan> {
+fn merge(mut tracked: Vec<Orphan>, env: Vec<Orphan>) -> Vec<Orphan> {
     let seen: HashSet<Pid> = tracked.iter().map(|o| o.pid).collect();
     tracked.extend(env.into_iter().filter(|o| !seen.contains(&o.pid)));
     tracked.sort_by_key(|o| o.pid);
@@ -603,7 +603,7 @@ pub struct BusyTracker {
 }
 
 /// Ticks that cover [`BUSY_SPAN`] at `tick`, at least one.
-pub fn busy_window(tick: Duration) -> usize {
+fn busy_window(tick: Duration) -> usize {
     (BUSY_SPAN.as_secs_f64() / tick.as_secs_f64())
         .ceil()
         .max(1.0) as usize
@@ -651,9 +651,60 @@ impl BusyTracker {
     }
 }
 
+/// Fills agents and orphans from a process snapshot each tick, keeping the
+/// state that spans ticks.
+pub struct Sessions {
+    home: Option<PathBuf>,
+    /// See [`claude::config`].
+    claude: Option<PathBuf>,
+    busy: BusyTracker,
+    tracker: OrphanTracker,
+    env: EnvOrphans,
+    /// See [`read_environ`].
+    environ: fn(Pid) -> Option<Vec<u8>>,
+}
+
+impl Sessions {
+    pub fn new(home: Option<PathBuf>, claude: Option<PathBuf>, tick: Duration) -> Self {
+        Self {
+            home,
+            claude,
+            busy: BusyTracker::new(busy_window(tick)),
+            tracker: OrphanTracker::default(),
+            env: EnvOrphans::new(Pid::from_u32(std::process::id())),
+            environ: read_environ,
+        }
+    }
+
+    pub fn observe(
+        &mut self,
+        procs: &HashMap<Pid, ProcInfo>,
+        now: SystemTime,
+    ) -> (Vec<Agent>, Vec<Orphan>) {
+        let (home, claude) = (self.home.as_deref(), self.claude.as_deref());
+        let mut agents = scan(procs, home, |pid| claude::read_session(claude?, pid));
+        if let Some(claude) = claude {
+            for agent in &mut agents {
+                if let Some(id) = &agent.session_id {
+                    let cwd = procs[&agent.procs[0].pid].cwd.as_deref();
+                    agent.subagents = claude::running_subagents(claude, cwd, id, now);
+                }
+            }
+        }
+        // after the subagents, which count a session busy
+        self.busy.update(&mut agents);
+        let orphans = merge(
+            self.tracker.update(procs, &agents),
+            self.env.update(procs, &agents, home, self.environ),
+        );
+        (agents, orphans)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::claude::fixture;
 
     fn kind(cmd: &str) -> Option<&'static str> {
         let cmd: Vec<OsString> = cmd.split(' ').map(OsString::from).collect();
@@ -1125,7 +1176,7 @@ mod tests {
         assert_eq!(agents[0].reported, None);
     }
 
-    /// Session files by pid, as [`crate::claude::read_session`] returns them.
+    /// Session files by pid, as [`claude::read_session`] returns them.
     fn files(files: &[(u32, SessionFile)]) -> impl FnMut(Pid) -> Option<SessionFile> {
         let files: HashMap<u32, SessionFile> = files.iter().cloned().collect();
         move |pid| files.get(&pid.as_u32()).cloned()
@@ -1324,13 +1375,20 @@ mod tests {
 
     #[test]
     fn running_subagent_makes_an_idle_session_busy() {
-        let mut busy = BusyTracker::new(WINDOW);
-        let mut agents = reporting(0.0, Some(false));
-        agents[0].subagents.push(Subagent {
-            id: "a1".into(),
-            kind: "Explore".into(),
-        });
-        busy.update(&mut agents);
+        let (config, now) = fixture::idle_with_subagent("observe", 10);
+        let mut sessions = Sessions {
+            home: home().map(Path::to_path_buf),
+            claude: Some(config.clone()),
+            busy: BusyTracker::new(WINDOW),
+            tracker: OrphanTracker::default(),
+            env: EnvOrphans::new(Pid::from_u32(99)),
+            environ: |_| None,
+        };
+        let procs = HashMap::from([in_dir(proc(10, 1, 100, "claude"), "/x/hum")]);
+        let (agents, _) = sessions.observe(&procs, now);
+        fs::remove_dir_all(&config).unwrap();
+        assert_eq!(agents[0].reported, Some(false));
+        assert_eq!(agents[0].subagents.len(), 1);
         assert!(agents[0].busy);
     }
 

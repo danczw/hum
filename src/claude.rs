@@ -320,6 +320,17 @@ pub mod fixture {
         }
         (config, now)
     }
+
+    /// [`subagent_dir`] with one running `Explore` subagent, and the file of
+    /// session `5e55` at `/x/hum`, reporting idle, for `pid`.
+    pub fn idle_with_subagent(name: &str, pid: u32) -> (PathBuf, SystemTime) {
+        let (config, now) = subagent_dir(name, &[("a1", r#"{"agentType":"Explore"}"#, 0)]);
+        let sessions = config.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let file = r#"{"cwd":"/x/hum","sessionId":"5e55","status":"idle"}"#;
+        fs::write(sessions.join(format!("{pid}.json")), file).unwrap();
+        (config, now)
+    }
 }
 
 #[cfg(test)]
