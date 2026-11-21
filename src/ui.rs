@@ -1039,7 +1039,8 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::style::{Color, Modifier};
 
-    use crate::agents::{self, BusyTracker, ProcInfo, Subagent};
+    use crate::agents::{self, BusyTracker, ProcInfo};
+    use crate::claude::Subagent;
     use crate::focus::Focus;
     use crate::label::Label;
 

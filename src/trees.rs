@@ -70,7 +70,8 @@ mod tests {
     use sysinfo::Pid;
 
     use super::*;
-    use crate::agents::{Proc, Subagent};
+    use crate::agents::Proc;
+    use crate::claude::Subagent;
 
     /// A session per root pid, each with one child at `root + 1`.
     fn agents(roots: &[u32]) -> Vec<Agent> {

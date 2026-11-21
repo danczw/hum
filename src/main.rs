@@ -1,4 +1,5 @@
 mod agents;
+mod claude;
 mod cli;
 mod focus;
 mod label;
@@ -32,7 +33,7 @@ const CPU_SETTLE: Duration = Duration::from_millis(200);
 struct App {
     sys: System,
     home: Option<PathBuf>,
-    /// See [`agents::claude_config`].
+    /// See [`claude::config`].
     claude: Option<PathBuf>,
     ticks: u32,
     agents: Vec<Agent>,
@@ -49,7 +50,7 @@ impl App {
         let home = agents::canonical_home(std::env::var_os("HOME"));
         Ok(Self {
             sys: System::new().map_err(io::Error::other)?,
-            claude: agents::claude_config(std::env::var_os("CLAUDE_CONFIG_DIR"), home.as_deref()),
+            claude: claude::config(std::env::var_os("CLAUDE_CONFIG_DIR"), home.as_deref()),
             home,
             ticks: 0,
             agents: Vec::new(),
@@ -83,14 +84,14 @@ impl App {
         let procs = agents::snapshot(&self.sys);
         let claude = self.claude.as_deref();
         self.agents = agents::scan(&procs, self.home.as_deref(), |pid| {
-            agents::read_session(claude?, pid)
+            claude::read_session(claude?, pid)
         });
         if let Some(claude) = claude {
             let now = SystemTime::now();
             for agent in &mut self.agents {
                 if let Some(id) = &agent.session_id {
                     let cwd = procs[&agent.procs[0].pid].cwd.as_deref();
-                    agent.subagents = agents::running_subagents(claude, cwd, id, now);
+                    agent.subagents = claude::running_subagents(claude, cwd, id, now);
                 }
             }
         }
