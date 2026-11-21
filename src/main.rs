@@ -102,7 +102,9 @@ impl App {
                 .update(&procs, &self.agents, home, agents::read_environ),
         );
         if self.ticks.is_multiple_of(PORT_TICKS) {
-            self.ports = ports::listening(&self.sys);
+            self.ports = ports::listening(&procs);
+        } else {
+            ports::join(&mut self.ports, &procs);
         }
         self.ticks = self.ticks.wrapping_add(1);
     }
