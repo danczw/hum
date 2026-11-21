@@ -71,13 +71,13 @@ pub fn listening(procs: &HashMap<Pid, ProcInfo>) -> Vec<Listener> {
 
 /// Prefork servers (nginx, gunicorn) share one listen socket between a
 /// master and its workers; picks the master, the first holder whose parent
-/// holds none of it.
+/// holds none of it. Skips holders started after `procs` was read: a
+/// worker forked since then would pass for the master.
 fn master(pids: &[Pid], procs: &HashMap<Pid, ProcInfo>) -> Option<Pid> {
     pids.iter().copied().find(|pid| {
         procs
             .get(pid)
-            .and_then(|p| p.parent)
-            .is_none_or(|parent| !pids.contains(&parent))
+            .is_some_and(|p| p.parent.is_none_or(|parent| !pids.contains(&parent)))
     })
 }
 
@@ -289,6 +289,8 @@ mod tests {
         );
         // a worker alone, its master gone from the holders
         assert_eq!(master(&pids(&[12]), &procs), Some(Pid::from_u32(12)));
+        // 13 forked after procs was read
+        assert_eq!(master(&pids(&[13, 10]), &procs), Some(Pid::from_u32(10)));
     }
 
     #[test]
