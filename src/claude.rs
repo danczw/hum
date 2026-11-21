@@ -11,8 +11,8 @@ use sysinfo::Pid;
 /// listed.
 const SUBAGENT_QUIET: Duration = Duration::from_secs(660);
 
-/// Claude Code's file for a running session, parsed once. Its format is
-/// internal and may change, so every field is optional.
+/// Claude Code's file for a running session. Its format is internal and
+/// may change, so every field is optional.
 #[derive(Default)]
 #[cfg_attr(test, derive(Clone, Debug, PartialEq))]
 pub struct SessionFile {
