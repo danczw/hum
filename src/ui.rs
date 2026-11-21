@@ -1737,9 +1737,9 @@ mod tests {
         view.focus.step(1);
         let buf = draw_view((74, 16), mockup(), &mut view);
         assert!(selected_line(&buf, &theme).unwrap().contains("5871"));
-        // a new session sorts first and pushes 5871 down a row
+        // the session above exits and 5871 moves up a row
         let mut procs = mockup();
-        procs.push(root_proc(1000, "codex", "/x/new", 1 << 20));
+        procs.remove(0);
         let buf = draw_view((74, 16), procs, &mut view);
         assert!(selected_line(&buf, &theme).unwrap().contains("5871"));
     }
