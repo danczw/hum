@@ -247,7 +247,7 @@ fn render(frame: &mut Frame, screen: &Screen, view: &mut View) {
         let side = (body.width * 2 / 5).max(SIDE_MIN);
         let [left, right] =
             Layout::horizontal([Constraint::Fill(1), Constraint::Length(side)]).areas(body);
-        let agents = agents_section(&rows, screen.agents.len(), left.width, theme);
+        let agents = agents_section(&rows, left.width, theme);
         let orphans = orphans_section(screen.orphans, right.width, theme);
         stack(frame, [agents], left, compact, theme, focus);
         stack(
@@ -259,7 +259,7 @@ fn render(frame: &mut Frame, screen: &Screen, view: &mut View) {
             focus,
         );
     } else {
-        let agents = agents_section(&rows, screen.agents.len(), body.width, theme);
+        let agents = agents_section(&rows, body.width, theme);
         let orphans = orphans_section(screen.orphans, body.width, theme);
         let ports = ports(body.width);
         stack(frame, [agents, orphans, ports], body, compact, theme, focus);
@@ -402,8 +402,7 @@ fn draw_cores(frame: &mut Frame, cores: &[f64], grid: CoreGrid, area: Rect, them
 /// `width` is the whole box. Width beyond both names' minimum goes 3:1 to
 /// process and project, and names longer than their column end in `…`.
 /// Below both minimums the cores column goes first, then project gives way.
-/// `count` is the agents among `entries`, for the title.
-fn agents_section(entries: &[Entry], count: usize, width: u16, theme: &Theme) -> Section {
+fn agents_section(entries: &[Entry], width: u16, theme: &Theme) -> Section {
     let cores = width >= AGENTS_MIN;
     let names = (width + if cores { 0 } else { CORES_SPAN }).saturating_sub(AGENTS_FIXED);
     let project =
@@ -478,7 +477,10 @@ fn agents_section(entries: &[Entry], count: usize, width: u16, theme: &Theme) ->
     Section {
         name: "agents",
         pane: focus::AGENTS,
-        count,
+        count: entries
+            .iter()
+            .filter(|e| matches!(e.line, outline::Line::Root { .. }))
+            .count(),
         total: None,
         count_style: None,
         header: Row::new(columns(
