@@ -2,20 +2,37 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use sysinfo::{Pid, System};
+use sysinfo::Pid;
+
+use crate::agents::{ProcInfo, display_name};
 
 /// Socket state code for LISTEN in /proc/net/tcp.
 const TCP_LISTEN: u8 = 0x0A;
 
 pub struct Listener {
     pub port: u16,
-    pub pid: Option<Pid>,
+    /// None when the socket's holder is unreadable, e.g. another user's.
+    pub holder: Option<Holder>,
     /// Bound to a non-loopback address, such as 0.0.0.0 or a LAN IP.
     pub public: bool,
 }
 
+/// The process holding a listen socket; start time guards against pid
+/// reuse.
+pub struct Holder {
+    pub pid: Pid,
+    pub start: u64,
+    pub name: String,
+}
+
+impl Listener {
+    pub fn pid(&self) -> Option<Pid> {
+        self.holder.as_ref().map(|h| h.pid)
+    }
+}
+
 /// Listening TCP ports (IPv4 and IPv6) read from /proc. Linux only.
-pub fn listening(sys: &System) -> Vec<Listener> {
+pub fn listening(procs: &HashMap<Pid, ProcInfo>) -> Vec<Listener> {
     let mut sockets = Vec::new();
     for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
         let Ok(text) = fs::read_to_string(table) else {
@@ -37,19 +54,47 @@ pub fn listening(sys: &System) -> Vec<Listener> {
         .map(|(port, inode, public)| Listener {
             port,
             public,
-            // Prefork servers (nginx, gunicorn) share one listen socket
-            // between a master and its workers; show the master.
-            pid: holders.get(&inode).and_then(|pids| {
-                pids.iter().copied().find(|&pid| {
-                    sys.process(pid)
-                        .and_then(|p| p.parent())
-                        .is_none_or(|parent| !pids.contains(&parent))
-                })
-            }),
+            holder: holders
+                .get(&inode)
+                .and_then(|pids| master(pids, procs))
+                .and_then(|pid| procs.get(&pid))
+                .map(|p| Holder {
+                    pid: p.pid,
+                    start: p.start,
+                    name: display_name(&p.name, &p.cmd),
+                }),
         })
         .collect();
-    listeners.sort_by_key(|l| (l.port, l.pid));
+    listeners.sort_by_key(|l| (l.port, l.pid()));
     merge(listeners)
+}
+
+/// Prefork servers (nginx, gunicorn) share one listen socket between a
+/// master and its workers; picks the master, the first holder whose parent
+/// holds none of it.
+fn master(pids: &[Pid], procs: &HashMap<Pid, ProcInfo>) -> Option<Pid> {
+    pids.iter().copied().find(|pid| {
+        procs
+            .get(pid)
+            .and_then(|p| p.parent)
+            .is_none_or(|parent| !pids.contains(&parent))
+    })
+}
+
+/// Drops listeners whose holder exited since [`listening`], so a reused
+/// pid does not inherit the port, and renames the rest after what they run
+/// now. Ports are read every few ticks, `procs` every tick.
+pub fn join(ports: &mut Vec<Listener>, procs: &HashMap<Pid, ProcInfo>) {
+    ports.retain_mut(|l| {
+        let Some(holder) = &mut l.holder else {
+            return true;
+        };
+        let Some(p) = procs.get(&holder.pid).filter(|p| p.start == holder.start) else {
+            return false;
+        };
+        holder.name = display_name(&p.name, &p.cmd);
+        true
+    });
 }
 
 /// Folds sorted listeners of one port and pid into one, public if any of
@@ -58,7 +103,7 @@ fn merge(listeners: Vec<Listener>) -> Vec<Listener> {
     let mut merged: Vec<Listener> = Vec::with_capacity(listeners.len());
     for l in listeners {
         match merged.last_mut() {
-            Some(last) if (last.port, last.pid) == (l.port, l.pid) => last.public |= l.public,
+            Some(last) if (last.port, last.pid()) == (l.port, l.pid()) => last.public |= l.public,
             _ => merged.push(l),
         }
     }
@@ -204,15 +249,70 @@ mod tests {
         assert!(!is_public(Ipv4Addr::LOCALHOST.to_ipv6_mapped().into()));
     }
 
+    fn proc(pid: u32, parent: u32, start: u64, cmd: &str) -> (Pid, ProcInfo) {
+        let info = ProcInfo {
+            pid: Pid::from_u32(pid),
+            parent: Some(Pid::from_u32(parent)),
+            start,
+            name: cmd.into(),
+            cmd: vec![cmd.into()],
+            cpu: 0.0,
+            mem: 0,
+            cwd: None,
+        };
+        (info.pid, info)
+    }
+
+    fn held(port: u16, pid: u32, start: u64) -> Listener {
+        Listener {
+            port,
+            holder: Some(Holder {
+                pid: Pid::from_u32(pid),
+                start,
+                name: "npm".into(),
+            }),
+            public: false,
+        }
+    }
+
+    #[test]
+    fn prefork_master_holds_the_port() {
+        let procs = HashMap::from([
+            proc(10, 1, 100, "nginx"),
+            proc(11, 10, 101, "nginx"),
+            proc(12, 10, 102, "nginx"),
+        ]);
+        let pids = |ps: &[u32]| ps.iter().map(|&p| Pid::from_u32(p)).collect::<Vec<_>>();
+        assert_eq!(
+            master(&pids(&[11, 10, 12]), &procs),
+            Some(Pid::from_u32(10))
+        );
+        // a worker alone, its master gone from the holders
+        assert_eq!(master(&pids(&[12]), &procs), Some(Pid::from_u32(12)));
+    }
+
+    #[test]
+    fn join_drops_a_port_whose_pid_was_reused() {
+        let mut procs = HashMap::from([proc(10, 1, 100, "npm"), proc(20, 1, 200, "vite")]);
+        let mut ports = vec![held(3000, 10, 100), held(5173, 20, 200)];
+        // pid 10 exec'd into node; pid 20 exited and was reused
+        procs.extend([proc(10, 1, 100, "node"), proc(20, 1, 300, "bash")]);
+        join(&mut ports, &procs);
+        let got: Vec<_> = ports
+            .iter()
+            .map(|l| (l.port, l.holder.as_ref().unwrap().name.as_str()))
+            .collect();
+        assert_eq!(got, [(3000, "node")]);
+    }
+
     #[test]
     fn one_port_and_pid_shows_once_public_if_any_bind_is() {
         let l = |port, pid: u32, public| Listener {
-            port,
-            pid: Some(Pid::from_u32(pid)),
             public,
+            ..held(port, pid, 0)
         };
         let merged = merge(vec![l(3000, 7, false), l(3000, 7, true), l(3000, 8, false)]);
-        let got: Vec<_> = merged.iter().map(|l| (l.port, l.pid, l.public)).collect();
+        let got: Vec<_> = merged.iter().map(|l| (l.port, l.pid(), l.public)).collect();
         assert_eq!(
             got,
             [

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 
-use sysinfo::{Pid, Process, System};
+use sysinfo::{Pid, System};
 
 use crate::focus::{Key, key};
 use crate::label::Label;
@@ -605,11 +605,7 @@ fn match_agent(name: &OsStr, extra: &[&'static str]) -> Option<&'static str> {
 
 /// sysinfo keeps a pid's name from before an exec, but cmd is re-read every
 /// tick, so name the process after what it runs now.
-pub fn proc_name(p: &Process) -> String {
-    display_name(p.name(), p.cmd())
-}
-
-fn display_name(name: &OsStr, cmd: &[OsString]) -> String {
+pub fn display_name(name: &OsStr, cmd: &[OsString]) -> String {
     cmd.first()
         .map_or(name, |a| basename(a))
         .to_string_lossy()
@@ -818,6 +814,25 @@ fn marker(environ: &[u8]) -> Option<Marker> {
         let (name, value) = var.split_once('=')?;
         let &(kind, _) = MARKERS.iter().find(|(_, m)| *m == name)?;
         Some((kind, Pid::from_u32(value.parse().ok()?)))
+    })
+}
+
+/// Which agent or orphan the process `pid` started at `start` belongs to,
+/// for tagging ports. A reused pid matches neither.
+pub fn owner(agents: &[Agent], orphans: &[Orphan], pid: Pid, start: u64) -> Option<Owner> {
+    if let Some(agent) = agents
+        .iter()
+        .find(|a| a.procs.iter().any(|p| (p.pid, p.start) == (pid, start)))
+    {
+        return Some(Owner {
+            label: agent.label(),
+            orphan: false,
+        });
+    }
+    let orphan = orphans.iter().find(|o| (o.pid, o.start) == (pid, start))?;
+    Some(Owner {
+        label: orphan.from.clone(),
+        orphan: true,
     })
 }
 
@@ -1236,6 +1251,29 @@ mod tests {
         );
         assert_eq!(pids(&merged), [10, 20, 30]);
         assert_eq!(merged[1].from.project.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn port_owner_matches_pid_and_start() {
+        let mut tracker = OrphanTracker::default();
+        let procs = HashMap::from([
+            in_dir(proc(10, 1, 100, "claude"), HUM),
+            proc(11, 10, 101, "vite"),
+            proc(12, 10, 102, "tail"),
+        ]);
+        tracker.update(&procs, &scan(&procs, home(), no_session));
+        let mut procs = procs;
+        procs.extend([proc(12, 1, 102, "tail")]);
+        let agents = scan(&procs, home(), no_session);
+        let orphans = tracker.update(&procs, &agents);
+
+        let owner = |pid, start| owner(&agents, &orphans, Pid::from_u32(pid), start);
+        let tag = |pid, start| owner(pid, start).map(|o| o.to_string());
+        assert_eq!(tag(11, 101).as_deref(), Some("claude/hum"));
+        assert_eq!(tag(12, 102).as_deref(), Some("orphan:claude/hum"));
+        // the pids were reused by processes started later
+        assert_eq!(owner(11, 500), None);
+        assert_eq!(owner(12, 500), None);
     }
 
     /// One claude session at `pid` whose tree uses `cores`.

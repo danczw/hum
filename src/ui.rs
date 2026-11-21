@@ -164,7 +164,7 @@ struct PortRow {
     /// Bound beyond loopback; marked `*`.
     public: bool,
     name: String,
-    /// The session or orphan holding the port; see [`owner`].
+    /// The session or orphan holding the port; see [`agents::owner`].
     owner: Option<Owner>,
 }
 
@@ -200,14 +200,17 @@ fn screen(app: &App, cores: bool) -> Screen<'_> {
         .iter()
         .map(|l| PortRow {
             port: l.port,
-            pid: l.pid,
+            pid: l.pid(),
             public: l.public,
             name: l
-                .pid
-                .and_then(|pid| sys.process(pid))
-                .map(agents::proc_name)
+                .holder
+                .as_ref()
+                .map(|h| h.name.clone())
                 .unwrap_or_default(),
-            owner: l.pid.and_then(|p| owner(app, p)),
+            owner: l
+                .holder
+                .as_ref()
+                .and_then(|h| agents::owner(&app.agents, &app.orphans, h.pid, h.start)),
         })
         .collect();
     Screen {
@@ -963,25 +966,6 @@ fn draw_help(frame: &mut Frame, scroll: &mut usize) {
 /// Right-aligned, so numbers line up by their last digit.
 fn num(text: String) -> Cell<'static> {
     Cell::from(Line::from(text).alignment(Alignment::Right))
-}
-
-/// Which agent or orphan a pid belongs to, for tagging ports.
-fn owner(app: &App, pid: Pid) -> Option<Owner> {
-    if let Some(agent) = app
-        .agents
-        .iter()
-        .find(|a| a.procs.iter().any(|p| p.pid == pid))
-    {
-        return Some(Owner {
-            label: agent.label(),
-            orphan: false,
-        });
-    }
-    let orphan = app.orphans.iter().find(|o| o.pid == pid)?;
-    Some(Owner {
-        label: orphan.from.clone(),
-        orphan: true,
-    })
 }
 
 fn ratio((used, total): (u64, u64)) -> f64 {
