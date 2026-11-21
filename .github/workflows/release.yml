@@ -1,8 +1,9 @@
 name: Release
 
-# Every push to main with a feat, fix or perf commit since the last tag
-# releases the next version from cliff.toml. Pull requests that touch the
-# code or the release files run everything up to publishing, as a dry run.
+# Every push to main with a feat, fix, perf or breaking commit since the last
+# tag releases the next version from cliff.toml. Pull requests that touch the
+# code or the release files, and manual runs with nothing to release, run
+# everything up to publishing, as a dry run.
 on:
   push:
     branches: [main]
@@ -68,7 +69,7 @@ jobs:
     if: >-
       !cancelled() && needs.plan.result == 'success'
       && ((needs.checks.result == 'success' && needs.plan.outputs.release == 'true')
-      || (needs.checks.result == 'skipped' && github.event_name == 'pull_request'))
+      || (needs.checks.result == 'skipped' && github.event_name != 'push'))
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -112,9 +113,7 @@ jobs:
         run: |
           sed -i "s/^version = \"0.0.0-dev\"$/version = \"$VERSION\"/" Cargo.toml Cargo.lock
           grep -q "^version = \"$VERSION\"$" Cargo.toml
-      # The ci job already ran the tests natively on x86_64.
       - name: Test
-        if: matrix.target != 'x86_64-unknown-linux-musl'
         run: |
           if [ -n "$QEMU" ]; then
             export "CARGO_TARGET_$(echo "$TARGET" | tr a-z- A-Z_)_RUNNER=qemu-$QEMU"
@@ -183,6 +182,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "v$VERSION" dist/* --target "$GITHUB_SHA" --title "v$VERSION" --notes-file notes.md
 
+  # The tag exists once publish succeeds, so a new run skips this job. Recover
+  # a failure with "Re-run failed jobs" on the same run.
   homebrew:
     needs: [plan, publish]
     runs-on: ubuntu-latest
@@ -204,7 +205,7 @@ jobs:
         run: |
           sum() { sha256sum "dist/hum-$1-unknown-linux-musl.tar.gz" | cut -d' ' -f1; }
           mkdir -p tap/Formula
-          sed -e '1,2d' \
+          sed -e '/^#/d' \
             -e "s/@VERSION@/$VERSION/g" \
             -e "s/@SHA256_X86_64@/$(sum x86_64)/" \
             -e "s/@SHA256_AARCH64@/$(sum aarch64)/" \
