@@ -1382,14 +1382,10 @@ mod tests {
     #[test]
     fn running_subagent_makes_an_idle_session_busy() {
         let (config, now) = fixture::idle_with_subagent("observe", 10);
-        let mut sessions = Sessions {
-            home: home().map(Path::to_path_buf),
-            claude: Some(config.clone()),
-            busy: BusyTracker::new(WINDOW),
-            tracker: OrphanTracker::default(),
-            env: EnvOrphans::new(Pid::from_u32(99)),
-            environ: |_| None,
-        };
+        let home = home().map(Path::to_path_buf);
+        let mut sessions = Sessions::new(home, Some(config.clone()), Duration::from_secs(1));
+        // the fake pids may be real processes on this machine
+        sessions.environ = |_| None;
         let procs = HashMap::from([in_dir(proc(10, 1, 100, "claude"), "/x/hum")]);
         let (agents, _) = sessions.observe(&procs, now);
         fs::remove_dir_all(&config).unwrap();
