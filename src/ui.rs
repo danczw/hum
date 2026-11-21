@@ -9,8 +9,9 @@ use ratatui::widgets::{
 use sysinfo::Pid;
 
 use crate::App;
-use crate::agents::{self, Agent, Orphan};
+use crate::agents::{self, Agent, Orphan, Owner};
 use crate::focus::{self, Focus, Key, key, subagent_key};
+use crate::label::cut;
 use crate::theme::Theme;
 use crate::trees::{self, Trees};
 
@@ -163,9 +164,8 @@ struct PortRow {
     /// Bound beyond loopback; marked `*`.
     public: bool,
     name: String,
-    /// The session or orphan holding the port, as its label without the
-    /// session name, and the name; see [`owner`].
-    owner: Option<(String, Option<String>)>,
+    /// The session or orphan holding the port; see [`owner`].
+    owner: Option<Owner>,
 }
 
 /// A titled list of rows under a dim header naming the columns.
@@ -462,11 +462,7 @@ fn agents_section(agents: &[Agent], trees: &Trees, width: u16, theme: &Theme) ->
             Row::new(columns(
                 [
                     Cell::from(name),
-                    Cell::from(cut_tagged(
-                        &agent.project,
-                        agent.session.as_deref(),
-                        project_max,
-                    )),
+                    Cell::from(agent.label().fit_project(project_max)),
                     num(root.pid.to_string()),
                     num(fmt_cores(agent.cpu())),
                     num(fmt_bytes(agent.mem())),
@@ -556,7 +552,7 @@ fn orphans_section(orphans: &[Orphan], width: u16, theme: &Theme) -> Section {
     let rows = orphans
         .iter()
         .map(|o| {
-            let from = cut_tagged(&o.from, o.session.as_deref(), from_max);
+            let from = o.from.fit(from_max);
             Row::new(columns(
                 [
                     num(o.pid.to_string()),
@@ -640,9 +636,7 @@ fn ports_section(ports: &[PortRow], all: bool, width: u16, theme: &Theme) -> Sec
                 Cell::from(
                     p.owner
                         .as_ref()
-                        .map_or_else(String::new, |(base, session)| {
-                            cut_tagged(base, session.as_deref(), agent_max)
-                        }),
+                        .map_or_else(String::new, |o| o.fit(agent_max)),
                 ),
             ])
         })
@@ -678,11 +672,7 @@ fn ports_section(ports: &[PortRow], all: bool, width: u16, theme: &Theme) -> Sec
                 let mut spans = port(p);
                 spans.extend(
                     std::iter::once(p.name.clone())
-                        .chain(
-                            p.owner
-                                .as_ref()
-                                .map(|(base, session)| agents::tagged(base, session.as_deref())),
-                        )
+                        .chain(p.owner.as_ref().map(Owner::to_string))
                         .filter(|s| !s.is_empty())
                         .map(|s| Span::raw(format!(" {s}"))),
                 );
@@ -970,53 +960,28 @@ fn draw_help(frame: &mut Frame, scroll: &mut usize) {
     );
 }
 
-/// `text` up to `max` chars, ending in `…` when cut.
-fn cut(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    if max == 0 {
-        return String::new();
-    }
-    let mut cut: String = text.chars().take(max.saturating_sub(1)).collect();
-    cut.push('…');
-    cut
-}
-
-/// `text·session` up to `max` chars. A cut shortens `text` and keeps the
-/// session whole; a session too long for that drops `text` and is cut.
-fn cut_tagged(text: &str, session: Option<&str>, max: usize) -> String {
-    let Some(session) = session else {
-        return cut(text, max);
-    };
-    let tag = agents::tagged("", Some(session));
-    let room = max.saturating_sub(tag.chars().count());
-    if room == 0 {
-        return cut(&tag, max);
-    }
-    format!("{}{tag}", cut(text, room))
-}
-
 /// Right-aligned, so numbers line up by their last digit.
 fn num(text: String) -> Cell<'static> {
     Cell::from(Line::from(text).alignment(Alignment::Right))
 }
 
-/// Which agent a pid belongs to, for tagging ports: `claude/hum` or
-/// `orphan:claude/hum`, and the session name kept apart so a cut keeps it.
-fn owner(app: &App, pid: Pid) -> Option<(String, Option<String>)> {
+/// Which agent or orphan a pid belongs to, for tagging ports.
+fn owner(app: &App, pid: Pid) -> Option<Owner> {
     if let Some(agent) = app
         .agents
         .iter()
         .find(|a| a.procs.iter().any(|p| p.pid == pid))
     {
-        return Some((
-            agents::base_label(agent.kind, &agent.project),
-            agent.session.clone(),
-        ));
+        return Some(Owner {
+            label: agent.label(),
+            orphan: false,
+        });
     }
     let orphan = app.orphans.iter().find(|o| o.pid == pid)?;
-    Some((format!("orphan:{}", orphan.from), orphan.session.clone()))
+    Some(Owner {
+        label: orphan.from.clone(),
+        orphan: true,
+    })
 }
 
 fn ratio((used, total): (u64, u64)) -> f64 {
@@ -1092,6 +1057,7 @@ mod tests {
 
     use crate::agents::{self, BusyTracker, ProcInfo, Subagent};
     use crate::focus::Focus;
+    use crate::label::Label;
 
     const GIB: u64 = 1024 * 1024 * 1024;
 
@@ -1161,6 +1127,21 @@ mod tests {
         vec![0.21, 0.06, 1.0, 0.17, 0.0, 0.7, 0.3, 0.12]
     }
 
+    fn claude(project: &str, session: Option<&str>) -> Label {
+        Label {
+            kind: "claude",
+            project: Some(project.into()),
+            session: session.map(Into::into),
+        }
+    }
+
+    fn agent_owner(project: &str, session: Option<&str>) -> Option<Owner> {
+        Some(Owner {
+            label: claude(project, session),
+            orphan: false,
+        })
+    }
+
     fn draw_cores_view(
         (width, height): (u16, u16),
         procs: Vec<(Pid, ProcInfo)>,
@@ -1185,8 +1166,7 @@ mod tests {
         let orphans = [Orphan {
             pid: Pid::from_u32(9120),
             name: "node".into(),
-            from: "claude/hum".into(),
-            session: None,
+            from: claude("hum", None),
             start: 0,
             cpu: 0.0,
             mem: 48 << 20,
@@ -1204,7 +1184,7 @@ mod tests {
                     pid: Some(Pid::from_u32(9120)),
                     public: true,
                     name: "node".into(),
-                    owner: Some(("claude/hum".into(), None)),
+                    owner: agent_owner("hum", None),
                 },
                 PortRow {
                     port: 5432,
@@ -1218,7 +1198,7 @@ mod tests {
                     pid: Some(Pid::from_u32(5871)),
                     public: false,
                     name: "python".into(),
-                    owner: Some(("claude/infra".into(), None)),
+                    owner: agent_owner("infra", None),
                 },
             ],
         };
@@ -1274,14 +1254,6 @@ mod tests {
 
     fn fg(style: Style) -> Color {
         style.fg.unwrap_or_default()
-    }
-
-    #[test]
-    fn cut_tagged_keeps_the_session() {
-        assert_eq!(cut_tagged("hum", None, 9), "hum");
-        assert_eq!(cut_tagged("hum", Some("gate"), 9), "hum·gate");
-        assert_eq!(cut_tagged("dotfiles", Some("gate"), 9), "dot…·gate");
-        assert_eq!(cut_tagged("dotfiles", Some("verylongname"), 9), "·verylon…");
     }
 
     #[test]
@@ -1469,7 +1441,7 @@ mod tests {
             pid: None,
             public: false,
             name: "node".into(),
-            owner: Some(("claude/hum".into(), Some(session.into()))),
+            owner: agent_owner("hum", Some(session)),
         };
         let screen = Screen {
             cpu: 0.0,
@@ -1493,13 +1465,44 @@ mod tests {
     }
 
     #[test]
+    fn narrow_ports_box_keeps_the_orphan_prefix() {
+        let screen = Screen {
+            cpu: 0.0,
+            cores: eight_cores(),
+            mem: (GIB, 8 * GIB),
+            swap: (0, GIB),
+            agents: &[],
+            orphans: &[],
+            ports: vec![PortRow {
+                port: 3000,
+                pid: None,
+                public: false,
+                name: "node".into(),
+                owner: Some(Owner {
+                    label: claude("hum", Some("gate")),
+                    orphan: true,
+                }),
+            }],
+        };
+        // the 12-char agent column fits `orphan:` and the session, not the
+        // label between them
+        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        terminal.draw(|f| render(f, &screen, &mut view())).unwrap();
+        let lines = text(terminal.backend().buffer());
+        assert!(
+            lines.iter().any(|l| l.contains(" orphan:·gate ")),
+            "{lines:#?}"
+        );
+    }
+
+    #[test]
     fn filter_hiding_nothing_counts_plainly() {
         let ports = [PortRow {
             port: 3000,
             pid: None,
             public: true,
             name: "node".into(),
-            owner: Some(("claude/hum".into(), None)),
+            owner: agent_owner("hum", None),
         }];
         let section = ports_section(&ports, false, 74, &Theme::ayu_mirage());
         assert_eq!((section.count, section.total), (1, None));

@@ -1,6 +1,7 @@
 mod agents;
 mod cli;
 mod focus;
+mod label;
 mod ports;
 mod theme;
 mod trees;
