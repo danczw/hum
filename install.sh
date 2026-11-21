@@ -58,6 +58,8 @@ main() {
 
     tmp=$(mktemp -d)
     trap 'rm -rf "$tmp"' EXIT
+    # dash runs the EXIT trap on exit but not when a signal kills it.
+    trap 'exit 130' INT TERM
     archive=hum-$target.tar.gz
 
     fetch "$base/$archive" "$tmp/$archive" || err "download failed: $base/$archive"
@@ -72,9 +74,15 @@ main() {
     mkdir -p "$dir"
     cp "$tmp/hum" "$dir/hum.tmp"
     chmod 755 "$dir/hum.tmp"
+    # Run it from $dir before replacing hum, to catch a noexec mount or a
+    # binary this CPU cannot run.
+    if ! version=$("$dir/hum.tmp" --version); then
+        rm -f "$dir/hum.tmp"
+        err "$dir/hum.tmp does not run on this machine"
+    fi
     mv "$dir/hum.tmp" "$dir/hum"
 
-    echo "installed $("$dir/hum" --version) to $dir/hum"
+    echo "installed $version to $dir/hum"
     case :$PATH: in
         *:"$dir":*) ;;
         *) echo "note: $dir is not on PATH" ;;
