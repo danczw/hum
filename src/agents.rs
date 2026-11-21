@@ -128,9 +128,13 @@ impl Agent {
         &self.procs[0]
     }
 
-    /// Whether the tree has rows below the agent: processes or subagents.
+    /// Rows below the agent in its tree: processes and subagents.
+    pub fn children(&self) -> usize {
+        self.procs.len() - 1 + self.subagents.len()
+    }
+
     pub fn has_children(&self) -> bool {
-        self.procs.len() > 1 || !self.subagents.is_empty()
+        self.children() > 0
     }
 
     pub fn label(&self) -> Label {

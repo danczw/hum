@@ -414,10 +414,9 @@ fn agents_section(entries: &[Entry], count: usize, width: u16, theme: &Theme) ->
         .iter()
         .map(|entry| match entry.line {
             outline::Line::Root { agent, open } => {
-                let children = agent.procs.len() - 1 + agent.subagents.len();
                 // `▸ ● claude (14)` collapsed, `▾ ● claude` open; a long kind
                 // is cut before the count
-                let (marker, count) = match children {
+                let (marker, count) = match agent.children() {
                     0 => (' ', String::new()),
                     _ if open => ('▾', String::new()),
                     n => ('▸', format!(" ({n})")),
