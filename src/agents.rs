@@ -108,6 +108,7 @@ pub struct Agent {
     /// Tells apart agents of the same kind and project, see [`name_sessions`];
     /// None when the agent is the only one.
     pub session: Option<String>,
+    /// Names the directory of its subagents, see [`SessionId`].
     pub session_id: Option<SessionId>,
     /// Set from [`claude::running_subagents`]; empty for other agents.
     pub subagents: Vec<Subagent>,
@@ -182,15 +183,15 @@ pub fn scan(
     // oldest first, so a new agent lands at the bottom and rows hold still
     // while agents work
     agents.sort_by_key(|a| (a.procs[0].start, a.procs[0].pid));
-    let mut files: Vec<Option<SessionFile>> = agents
+    let files: Vec<Option<SessionFile>> = agents
         .iter()
         .map(|a| session_file(&procs[&a.procs[0].pid], a.kind, &mut read_session))
         .collect();
     name_sessions(procs, &mut agents, &files);
-    for (agent, file) in agents.iter_mut().zip(&mut files) {
+    for (agent, file) in agents.iter_mut().zip(files) {
         let Some(file) = file else { continue };
         agent.reported = file.busy;
-        agent.session_id = file.id.take();
+        agent.session_id = file.id;
     }
     agents
 }
@@ -1235,7 +1236,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_project_takes_user_and_auto_names() {
+    fn shared_project_takes_given_names() {
         let agents = scan(
             &hum_trio(),
             home(),
@@ -1274,8 +1275,13 @@ mod tests {
     }
 
     #[test]
-    fn missing_file_falls_back_to_rank() {
-        let agents = scan(&hum_trio(), home(), files(&[(20, given("gate", HUM))]));
+    fn missing_or_empty_file_falls_back_to_rank() {
+        let empty = SessionFile::default();
+        let agents = scan(
+            &hum_trio(),
+            home(),
+            files(&[(20, given("gate", HUM)), (30, empty)]),
+        );
         assert_eq!(
             labels(&agents),
             ["claude/hum·1", "claude/hum·gate", "claude/hum·3"]
