@@ -723,12 +723,14 @@ impl BusyTracker {
             if window.len() == self.window {
                 window.pop_front();
             }
+            // sampled with a reported status too, so the fallback has a full
+            // window if the status goes away
             window.push_back(agent.cpu());
-            // cpu is in percent of one core
-            let mean = window.iter().sum::<f32>() / window.len() as f32 / 100.0;
-            agent.busy = agent
-                .reported
-                .unwrap_or(window.len() == self.window && mean > BUSY_CORES);
+            agent.busy = agent.reported.unwrap_or_else(|| {
+                // cpu is in percent of one core
+                let mean = window.iter().sum::<f32>() / window.len() as f32 / 100.0;
+                window.len() == self.window && mean > BUSY_CORES
+            });
         }
     }
 }
