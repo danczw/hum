@@ -10,10 +10,10 @@ use sysinfo::Pid;
 
 use crate::App;
 use crate::agents::{self, Agent, Orphan, Owner};
-use crate::focus::{self, Focus, Key, key, subagent_key};
+use crate::focus::{self, Focus, Key, key};
 use crate::label::cut;
+use crate::outline::{self, Entry, Fold, Outline};
 use crate::theme::Theme;
-use crate::trees::{self, Trees};
 
 // Numbers get fixed widths and text columns fill what is left, so a narrow
 // pane truncates names, never numbers. Fill ranks below Length in ratatui's
@@ -92,15 +92,7 @@ pub struct View {
     pub all_ports: bool,
     pub theme: Theme,
     pub focus: Focus,
-    pub trees: Trees,
-}
-
-/// What a tree key does to the tree under the agents cursor.
-pub enum Fold {
-    Toggle,
-    Expand,
-    /// On a child row, moves the cursor to its root and leaves the tree open.
-    Collapse,
+    pub outline: Outline,
 }
 
 impl View {
@@ -112,33 +104,17 @@ impl View {
         let Some(at) = self.focus.selected(focus::AGENTS) else {
             return;
         };
-        let Some(agent) = trees::tree_of(agents, at) else {
-            return;
-        };
-        let root = trees::root(agent);
-        match fold {
-            Fold::Collapse if at != root => self.focus.select(focus::AGENTS, root),
-            // kept closed, so children spawned later start collapsed
-            _ if !agent.has_children() => {}
-            Fold::Toggle => self.trees.toggle(root),
-            Fold::Expand => self.trees.expand(root),
-            Fold::Collapse => self.trees.collapse(root),
+        if let Some(to) = self.outline.fold(agents, at, fold) {
+            self.focus.select(focus::AGENTS, to);
         }
     }
 
     /// Forgets exited sessions and moves a cursor on a hidden child to its
-    /// root, whether a key collapsed the tree or its root changed.
+    /// root, whether `c` collapsed the tree or its children exited.
     fn sync(&mut self, agents: &[Agent]) {
-        self.trees.retain(agents);
-        if let Some(agent) = self
-            .focus
-            .selected(focus::AGENTS)
-            .and_then(|at| trees::tree_of(agents, at))
-        {
-            let root = trees::root(agent);
-            if !self.trees.is_open(root) {
-                self.focus.select(focus::AGENTS, root);
-            }
+        let at = self.focus.selected(focus::AGENTS);
+        if let Some(to) = self.outline.sync(agents, at) {
+            self.focus.select(focus::AGENTS, to);
         }
     }
 }
@@ -233,7 +209,7 @@ fn screen(app: &App, cores: bool) -> Screen<'_> {
 
 fn render(frame: &mut Frame, screen: &Screen, view: &mut View) {
     view.sync(screen.agents);
-    let (theme, trees) = (&view.theme, &view.trees);
+    let theme = &view.theme;
     let focus = &mut view.focus;
     let area = frame.area();
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
@@ -266,11 +242,12 @@ fn render(frame: &mut Frame, screen: &Screen, view: &mut View) {
     }
 
     let ports = |width| ports_section(&screen.ports, view.all_ports, width, theme);
+    let rows = view.outline.rows(screen.agents);
     if body.width >= WIDE {
         let side = (body.width * 2 / 5).max(SIDE_MIN);
         let [left, right] =
             Layout::horizontal([Constraint::Fill(1), Constraint::Length(side)]).areas(body);
-        let agents = agents_section(screen.agents, trees, left.width, theme);
+        let agents = agents_section(&rows, screen.agents.len(), left.width, theme);
         let orphans = orphans_section(screen.orphans, right.width, theme);
         stack(frame, [agents], left, compact, theme, focus);
         stack(
@@ -282,7 +259,7 @@ fn render(frame: &mut Frame, screen: &Screen, view: &mut View) {
             focus,
         );
     } else {
-        let agents = agents_section(screen.agents, trees, body.width, theme);
+        let agents = agents_section(&rows, screen.agents.len(), body.width, theme);
         let orphans = orphans_section(screen.orphans, body.width, theme);
         let ports = ports(body.width);
         stack(frame, [agents, orphans, ports], body, compact, theme, focus);
@@ -425,64 +402,53 @@ fn draw_cores(frame: &mut Frame, cores: &[f64], grid: CoreGrid, area: Rect, them
 /// `width` is the whole box. Width beyond both names' minimum goes 3:1 to
 /// process and project, and names longer than their column end in `…`.
 /// Below both minimums the cores column goes first, then project gives way.
-fn agents_section(agents: &[Agent], trees: &Trees, width: u16, theme: &Theme) -> Section {
+/// `count` is the agents among `entries`, for the title.
+fn agents_section(entries: &[Entry], count: usize, width: u16, theme: &Theme) -> Section {
     let cores = width >= AGENTS_MIN;
     let names = (width + if cores { 0 } else { CORES_SPAN }).saturating_sub(AGENTS_FIXED);
     let project =
         names.saturating_sub(PROCESS).min(PROJECT) + names.saturating_sub(PROCESS + PROJECT) / 4;
     let process = names - project;
     let (process_max, project_max) = (usize::from(process), usize::from(project));
-    let mut rows = Vec::new();
-    let mut keys = Vec::new();
-    for agent in agents {
-        let root = &agent.procs[0];
-        let kids = &agent.procs[1..];
-        let children = kids.len() + agent.subagents.len();
-        let root_key = trees::root(agent);
-        let open = trees.is_open(root_key);
-        // `▸ ● claude (14)` collapsed, `▾ ● claude` open; a long kind is cut
-        // before the count
-        let (marker, count) = match children {
-            0 => (' ', String::new()),
-            _ if open => ('▾', String::new()),
-            n => ('▸', format!(" ({n})")),
-        };
-        let (status, status_style) = match agent.busy {
-            true => ('●', theme.accent),
-            false => ('○', theme.dim),
-        };
-        let kind = cut(agent.kind, process_max.saturating_sub(4 + count.len()));
-        let name = cut(&format!("{marker} {status} {kind}{count}"), process_max);
-        let mut chars = name.chars();
-        let fold: String = chars.by_ref().take(2).collect();
-        let status: String = chars.by_ref().take(1).collect();
-        let name = Line::from(vec![
-            Span::raw(fold),
-            Span::styled(status, status_style),
-            Span::raw(chars.collect::<String>()),
-        ]);
-        rows.push(
-            Row::new(columns(
-                [
-                    Cell::from(name),
-                    Cell::from(agent.label().fit_project(project_max)),
-                    num(root.pid.to_string()),
-                    num(fmt_cores(agent.cpu())),
-                    num(fmt_bytes(agent.mem())),
-                ],
-                cores,
-            ))
-            .style(theme.accent),
-        );
-        keys.push(root_key);
-        if !open {
-            continue;
-        }
-        // above the processes, which can be many servers that would push
-        // them out of a short pane. One level deep: a meta file does not
-        // name the subagent that started it.
-        for s in &agent.subagents {
-            rows.push(Row::new(columns(
+    let rows = entries
+        .iter()
+        .map(|entry| match entry.line {
+            outline::Line::Root { agent, open } => {
+                let children = agent.procs.len() - 1 + agent.subagents.len();
+                // `▸ ● claude (14)` collapsed, `▾ ● claude` open; a long kind
+                // is cut before the count
+                let (marker, count) = match children {
+                    0 => (' ', String::new()),
+                    _ if open => ('▾', String::new()),
+                    n => ('▸', format!(" ({n})")),
+                };
+                let (status, status_style) = match agent.busy {
+                    true => ('●', theme.accent),
+                    false => ('○', theme.dim),
+                };
+                let kind = cut(agent.kind, process_max.saturating_sub(4 + count.len()));
+                let name = cut(&format!("{marker} {status} {kind}{count}"), process_max);
+                let mut chars = name.chars();
+                let fold: String = chars.by_ref().take(2).collect();
+                let status: String = chars.by_ref().take(1).collect();
+                let name = Line::from(vec![
+                    Span::raw(fold),
+                    Span::styled(status, status_style),
+                    Span::raw(chars.collect::<String>()),
+                ]);
+                Row::new(columns(
+                    [
+                        Cell::from(name),
+                        Cell::from(agent.label().fit_project(project_max)),
+                        num(agent.root().pid.to_string()),
+                        num(fmt_cores(agent.cpu())),
+                        num(fmt_bytes(agent.mem())),
+                    ],
+                    cores,
+                ))
+                .style(theme.accent)
+            }
+            outline::Line::Subagent(s) => Row::new(columns(
                 [
                     Cell::from(cut(&format!("    ◇ {}", s.kind), process_max)),
                     Cell::from(""),
@@ -491,11 +457,8 @@ fn agents_section(agents: &[Agent], trees: &Trees, width: u16, theme: &Theme) ->
                     Cell::from(""),
                 ],
                 cores,
-            )));
-            keys.push(subagent_key(&s.id));
-        }
-        for p in kids {
-            rows.push(Row::new(columns(
+            )),
+            outline::Line::Proc(p) => Row::new(columns(
                 [
                     Cell::from(cut(
                         // past the agent's status dot, so an agent without
@@ -510,14 +473,13 @@ fn agents_section(agents: &[Agent], trees: &Trees, width: u16, theme: &Theme) ->
                     num(fmt_bytes(p.mem)),
                 ],
                 cores,
-            )));
-            keys.push(key(p.pid, p.start));
-        }
-    }
+            )),
+        })
+        .collect();
     Section {
         name: "agents",
         pane: focus::AGENTS,
-        count: agents.len(),
+        count,
         total: None,
         count_style: None,
         header: Row::new(columns(
@@ -531,7 +493,7 @@ fn agents_section(agents: &[Agent], trees: &Trees, width: u16, theme: &Theme) ->
             cores,
         )),
         rows,
-        keys,
+        keys: entries.iter().map(|e| e.key).collect(),
         widths: columns(
             [
                 Constraint::Length(process),
@@ -1094,7 +1056,7 @@ mod tests {
     /// Draws with every tree expanded.
     fn draw((width, height): (u16, u16), procs: Vec<(Pid, ProcInfo)>, theme: Theme) -> Buffer {
         let mut view = View { theme, ..view() };
-        view.trees.expand_all(&scan(&procs));
+        view.outline.expand_all(&scan(&procs));
         draw_view((width, height), procs, &mut view)
     }
 
@@ -1704,7 +1666,7 @@ mod tests {
     fn cursor_reaches_the_last_of_30_agent_rows_in_74x9() {
         let theme = Theme::ayu_mirage();
         let mut view = View { theme, ..view() };
-        view.trees.expand_all(&scan(&big_tree(29)));
+        view.outline.expand_all(&scan(&big_tree(29)));
         draw_view((74, 9), big_tree(29), &mut view);
         view.focus.step(1);
         for _ in 0..29 {
@@ -1721,7 +1683,7 @@ mod tests {
     fn focused_section_keeps_a_line_for_its_cursor() {
         let theme = Theme::ayu_mirage();
         let mut view = View { theme, ..view() };
-        view.trees.expand_all(&scan(&big_tree(29)));
+        view.outline.expand_all(&scan(&big_tree(29)));
         draw_view((74, 9), big_tree(29), &mut view);
         view.focus.cycle(1);
         view.focus.cycle(1);
@@ -1734,7 +1696,7 @@ mod tests {
         let theme = Theme::ayu_mirage();
         for height in [8, 10] {
             let mut view = View { theme, ..view() };
-            view.trees.expand_all(&scan(&big_tree(29)));
+            view.outline.expand_all(&scan(&big_tree(29)));
             draw_view((74, height), big_tree(29), &mut view);
             view.focus.cycle(1);
             view.focus.cycle(1);
@@ -1822,7 +1784,7 @@ mod tests {
         let buf = draw_agents((74, 16), &agents, eight_cores(), &mut view);
         let lines = text(&buf);
         assert!(lines[4].starts_with("│ ▸ ○ claude (4) "), "{lines:#?}");
-        view.trees.expand_all(&agents);
+        view.outline.expand_all(&agents);
         let lines = text(&draw_agents((74, 16), &agents, eight_cores(), &mut view));
         assert!(lines[5].starts_with("│     ◇ Explore  "), "{lines:#?}");
         assert!(lines[6].starts_with("│     ◇ code-review  "), "{lines:#?}");
@@ -1838,7 +1800,7 @@ mod tests {
     fn subagents_fit_the_glance_pane() {
         let agents = with_subagents();
         let mut view = view();
-        view.trees.expand_all(&agents);
+        view.outline.expand_all(&agents);
         let lines = text(&draw_agents((74, 10), &agents, eight_cores(), &mut view));
         assert!(lines.iter().any(|l| l.contains("◇ Explore")), "{lines:#?}");
     }
@@ -1848,29 +1810,10 @@ mod tests {
         let mut agents = scan(&mockup());
         agents[0].subagents = with_subagents().remove(0).subagents;
         let mut view = view();
-        view.trees.expand_all(&agents);
+        view.outline.expand_all(&agents);
         let lines = text(&draw_agents((74, 16), &agents, eight_cores(), &mut view));
         assert!(lines[4].starts_with("│ ▾ ○ claude "), "{lines:#?}");
         assert!(lines[5].starts_with("│     ◇ Explore "), "{lines:#?}");
-    }
-
-    #[test]
-    fn collapse_on_a_subagent_moves_the_cursor_to_its_root() {
-        let agents = with_subagents();
-        let mut view = view();
-        view.trees.expand_all(&agents);
-        draw_agents((74, 16), &agents, eight_cores(), &mut view);
-        view.focus.step(1);
-        view.focus.step(1);
-        let buf = draw_agents((74, 16), &agents, eight_cores(), &mut view);
-        assert!(
-            selected_line(&buf, &view.theme)
-                .unwrap()
-                .contains("Explore")
-        );
-        view.fold(&agents, Fold::Collapse);
-        let buf = draw_agents((74, 16), &agents, eight_cores(), &mut view);
-        assert!(selected_line(&buf, &view.theme).unwrap().contains("4123"));
     }
 
     fn view() -> View {
@@ -1881,7 +1824,7 @@ mod tests {
             all_ports: false,
             theme: Theme::ayu_mirage(),
             focus: Focus::default(),
-            trees: Trees::default(),
+            outline: Outline::default(),
         }
     }
 
@@ -1980,75 +1923,19 @@ mod tests {
     }
 
     #[test]
-    fn expanded_trees_stay_expanded_across_ticks() {
+    fn enter_on_a_child_collapses_its_tree_under_the_cursor() {
         let mut view = view();
         let agents = scan(&sessions());
-        draw_view((74, 16), sessions(), &mut view);
-        view.focus.step(1);
-        view.fold(&agents, Fold::Toggle);
-        for _ in 0..3 {
-            draw_view((74, 16), sessions(), &mut view);
-        }
-        view.focus.last();
-        draw_view((74, 16), sessions(), &mut view);
-        view.focus.step(-1);
-        draw_view((74, 16), sessions(), &mut view);
-        view.fold(&agents, Fold::Expand);
-        let buf = draw_view((74, 16), sessions(), &mut view);
-        assert!(
-            text(&buf)[4].starts_with("│ ▾ ○ claude "),
-            "{:#?}",
-            text(&buf)
-        );
-        assert!(shows(&buf, "4125") && shows(&buf, "5872"));
-    }
-
-    #[test]
-    fn collapse_then_expand_all_restores_every_tree() {
-        let mut view = view();
-        let agents = scan(&sessions());
-        view.trees.expand_all(&agents);
-        view.trees.collapse_all();
-        let buf = draw_view((74, 16), sessions(), &mut view);
-        assert!(!shows(&buf, "4124") && !shows(&buf, "5872"));
-        view.trees.expand_all(&agents);
-        let buf = draw_view((74, 16), sessions(), &mut view);
-        for pid in ["4124", "4125", "5872"] {
-            assert!(shows(&buf, pid), "{pid}");
-        }
-    }
-
-    #[test]
-    fn cursor_on_a_collapsed_child_moves_to_its_root() {
-        let mut view = view();
-        let agents = scan(&sessions());
-        view.trees.expand_all(&agents);
+        view.outline.expand_all(&agents);
         draw_view((74, 16), sessions(), &mut view);
         view.focus.step(1);
         view.focus.step(2);
         let buf = draw_view((74, 16), sessions(), &mut view);
         assert!(selected_line(&buf, &view.theme).unwrap().contains("4125"));
-        // ← on a child goes to the root and leaves the tree open
-        view.fold(&agents, Fold::Collapse);
-        let buf = draw_view((74, 16), sessions(), &mut view);
-        assert!(selected_line(&buf, &view.theme).unwrap().contains("4123"));
-        assert!(shows(&buf, "4125"));
-        // Enter on a child collapses its tree
-        view.focus.step(2);
-        draw_view((74, 16), sessions(), &mut view);
         view.fold(&agents, Fold::Toggle);
         let buf = draw_view((74, 16), sessions(), &mut view);
         assert!(selected_line(&buf, &view.theme).unwrap().contains("4123"));
         assert!(!shows(&buf, "4125"));
-        // so does collapsing every tree
-        view.trees.expand_all(&agents);
-        view.focus.last();
-        draw_view((74, 16), sessions(), &mut view);
-        view.focus.step(-1);
-        draw_view((74, 16), sessions(), &mut view);
-        view.trees.collapse_all();
-        let buf = draw_view((74, 16), sessions(), &mut view);
-        assert!(selected_line(&buf, &view.theme).unwrap().contains("5871"));
     }
 
     #[test]

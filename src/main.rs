@@ -3,9 +3,9 @@ mod claude;
 mod cli;
 mod focus;
 mod label;
+mod outline;
 mod ports;
 mod theme;
-mod trees;
 mod ui;
 
 use std::io;
@@ -19,10 +19,10 @@ use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use agents::{Agent, Orphan, Sessions};
 use cli::Action;
 use focus::Focus;
+use outline::{Fold, Outline};
 use ports::Listener;
 use theme::Theme;
-use trees::Trees;
-use ui::{Fold, View};
+use ui::View;
 
 /// Ports change rarely and resolving owners reads every fd in /proc.
 const PORT_TICKS: u32 = 5;
@@ -109,7 +109,7 @@ fn main() -> io::Result<ExitCode> {
         all_ports: false,
         theme: Theme::from_env(),
         focus: Focus::default(),
-        trees: Trees::default(),
+        outline: Outline::default(),
     };
     let terminal = ratatui::init();
     let result = run(terminal, &mut app, &mut view);
@@ -169,8 +169,8 @@ fn run(mut terminal: DefaultTerminal, app: &mut App, view: &mut View) -> io::Res
                 KeyCode::Enter | KeyCode::Char(' ') => view.fold(agents, Fold::Toggle),
                 KeyCode::Char('l') | KeyCode::Right => view.fold(agents, Fold::Expand),
                 KeyCode::Char('h') | KeyCode::Left => view.fold(agents, Fold::Collapse),
-                KeyCode::Char('e') => view.trees.expand_all(agents),
-                KeyCode::Char('c') => view.trees.collapse_all(),
+                KeyCode::Char('e') => view.outline.expand_all(agents),
+                KeyCode::Char('c') => view.outline.collapse_all(),
                 KeyCode::Char('1') => view.cores = !view.cores,
                 KeyCode::Char('a') => view.all_ports = !view.all_ports,
                 _ => {}
