@@ -39,7 +39,8 @@ const MARKERS: &[(&str, &str)] = &[("claude", "CLAUDE_PID")];
 /// An agent kind and the agent pid its marker holds.
 type Marker = (&'static str, Pid);
 
-/// Span of tree cpu averaged to call a session busy.
+/// Span of tree cpu averaged to call a session busy, for agents without a
+/// reported status, see [`Agent::reported`].
 const BUSY_SPAN: Duration = Duration::from_secs(5);
 /// Mean tree cpu, in cores, above which a session counts as busy. A claude
 /// session idle at its prompt measured 0.006 to 0.024, one waiting on a tool
@@ -95,8 +96,12 @@ pub struct Agent {
     pub project: String,
     /// The agent process first, then its descendants depth-first.
     pub procs: Vec<Proc>,
-    /// Set by [`BusyTracker::update`]; false until a window of samples exists.
+    /// Set by [`BusyTracker::update`]; without [`Agent::reported`], false
+    /// until a window of samples exists.
     pub busy: bool,
+    /// Busy or idle as the agent itself reports it, see [`reported_busy`];
+    /// None leaves `busy` to tree cpu.
+    pub reported: Option<bool>,
     /// Tells apart agents of the same kind and project, see [`name_sessions`];
     /// None when the agent is the only one.
     pub session: Option<String>,
@@ -117,7 +122,7 @@ impl Agent {
 pub fn scan(
     procs: &HashMap<Pid, ProcInfo>,
     home: Option<&Path>,
-    read_session: impl FnMut(Pid) -> Option<String>,
+    mut read_session: impl FnMut(Pid) -> Option<String>,
 ) -> Vec<Agent> {
     let mut children: HashMap<Pid, Vec<Pid>> = HashMap::new();
     for p in procs.values() {
@@ -148,11 +153,19 @@ pub fn scan(
                 project: project(procs[&pid].cwd.as_deref(), home),
                 procs: tree,
                 busy: false,
+                reported: None,
                 session: None,
             }
         })
         .collect();
-    name_sessions(procs, &mut agents, read_session);
+    let files: Vec<Option<String>> = agents
+        .iter()
+        .map(|a| session_file(&procs[&a.procs[0].pid], a.kind, &mut read_session))
+        .collect();
+    for (agent, file) in agents.iter_mut().zip(&files) {
+        agent.reported = file.as_deref().and_then(reported_busy);
+    }
+    name_sessions(procs, &mut agents, &files);
     // oldest first, so a row moves only when an agent above it exits
     agents.sort_by_key(|a| (a.procs[0].start, a.procs[0].pid));
     agents
@@ -177,11 +190,8 @@ pub fn tagged(base: &str, session: Option<&str>) -> String {
 /// file, `--name` in argv, the file's derived name without its leading
 /// `<project>-`, then the 1-based rank by start time in the group. Names
 /// taken twice in a group, or equal to a rank, fall back to the rank too.
-fn name_sessions(
-    procs: &HashMap<Pid, ProcInfo>,
-    agents: &mut [Agent],
-    mut read_session: impl FnMut(Pid) -> Option<String>,
-) {
+/// `files` holds each agent's [`session_file`], by index.
+fn name_sessions(procs: &HashMap<Pid, ProcInfo>, agents: &mut [Agent], files: &[Option<String>]) {
     let mut groups: HashMap<(&str, String), Vec<usize>> = HashMap::new();
     for (i, a) in agents.iter().enumerate() {
         groups
@@ -196,15 +206,8 @@ fn name_sessions(
             .map(|&i| {
                 let agent = &agents[i];
                 let info = &procs[&agent.procs[0].pid];
-                let file = (agent.kind == "claude")
-                    .then(|| read_session(info.pid))
-                    .flatten()
-                    .filter(|f| {
-                        let cwd = top_level_str(f, "cwd");
-                        cwd.is_some() && cwd.as_deref().map(Path::new) == info.cwd.as_deref()
-                    });
                 let file_name = |sources: &[&str]| {
-                    let file = file.as_deref()?;
+                    let file = files[i].as_deref()?;
                     let source = top_level_str(file, "nameSource")?;
                     sources
                         .contains(&source.as_str())
@@ -233,6 +236,32 @@ fn name_sessions(
                 _ => (rank + 1).to_string(),
             });
         }
+    }
+}
+
+/// A claude agent's session file, when it names the agent's cwd.
+fn session_file(
+    info: &ProcInfo,
+    kind: &str,
+    read_session: impl FnOnce(Pid) -> Option<String>,
+) -> Option<String> {
+    (kind == "claude")
+        .then(|| read_session(info.pid))
+        .flatten()
+        .filter(|f| {
+            let cwd = top_level_str(f, "cwd");
+            cwd.is_some() && cwd.as_deref().map(Path::new) == info.cwd.as_deref()
+        })
+}
+
+/// The session file's `status`: Claude Code writes `busy` for a whole turn,
+/// tool calls and API waits included, and `idle` at the prompt. Other
+/// values are unknown and give None.
+fn reported_busy(file: &str) -> Option<bool> {
+    match top_level_str(file, "status")?.as_str() {
+        "busy" => Some(true),
+        "idle" => Some(false),
+        _ => None,
     }
 }
 
@@ -697,7 +726,9 @@ impl BusyTracker {
             window.push_back(agent.cpu());
             // cpu is in percent of one core
             let mean = window.iter().sum::<f32>() / window.len() as f32 / 100.0;
-            agent.busy = window.len() == self.window && mean > BUSY_CORES;
+            agent.busy = agent
+                .reported
+                .unwrap_or(window.len() == self.window && mean > BUSY_CORES);
         }
     }
 }
@@ -1103,6 +1134,50 @@ mod tests {
         let mut agents = session(10, 500, 1.0);
         busy.update(&mut agents);
         assert!(!agents[0].busy);
+    }
+
+    /// A claude session in /home/u/code/hum at `cores`, whose session file
+    /// reports `status`.
+    fn reporting(cores: f32, status: &str) -> Vec<Agent> {
+        let (pid, mut info) = in_dir(proc(10, 1, 100, "claude"), "/home/u/code/hum");
+        info.cpu = cores * 100.0;
+        let file = format!(r#"{{"cwd":"/home/u/code/hum","status":"{status}"}}"#);
+        scan(&HashMap::from([(pid, info)]), home(), files(&[(10, &file)]))
+    }
+
+    #[test]
+    fn reported_status_beats_tree_cpu() {
+        let mut busy = BusyTracker::new(WINDOW);
+        // mid-turn, waiting on the API below BUSY_CORES on every tick
+        for _ in 0..2 * WINDOW {
+            let mut agents = reporting(0.01, "busy");
+            busy.update(&mut agents);
+            assert!(agents[0].busy);
+        }
+        // a dev server spinning under a session at its prompt
+        let mut agents = reporting(1.0, "idle");
+        busy.update(&mut agents);
+        assert!(!agents[0].busy);
+    }
+
+    #[test]
+    fn unknown_status_falls_back_to_cpu() {
+        let mut busy = BusyTracker::new(WINDOW);
+        let mut agents = Vec::new();
+        for _ in 0..WINDOW {
+            agents = reporting(1.0, "compacting");
+            busy.update(&mut agents);
+        }
+        assert_eq!(agents[0].reported, None);
+        assert!(agents[0].busy);
+    }
+
+    #[test]
+    fn only_claude_reads_a_status() {
+        let (pid, info) = in_dir(proc(10, 1, 100, "codex"), "/home/u/code/hum");
+        let file = r#"{"cwd":"/home/u/code/hum","status":"busy"}"#;
+        let agents = scan(&HashMap::from([(pid, info)]), home(), files(&[(10, file)]));
+        assert_eq!(agents[0].reported, None);
     }
 
     /// Session files by pid, as [`read_session`] returns them.
