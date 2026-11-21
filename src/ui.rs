@@ -1937,6 +1937,15 @@ mod tests {
         let buf = draw_view((74, 16), sessions(), &mut view);
         assert!(selected_line(&buf, &view.theme).unwrap().contains("4123"));
         assert!(!shows(&buf, "4125"));
+        // so does collapsing every tree, on the next draw
+        view.outline.expand_all(&agents);
+        view.focus.last();
+        draw_view((74, 16), sessions(), &mut view);
+        view.focus.step(-1);
+        draw_view((74, 16), sessions(), &mut view);
+        view.outline.collapse_all();
+        let buf = draw_view((74, 16), sessions(), &mut view);
+        assert!(selected_line(&buf, &view.theme).unwrap().contains("5871"));
     }
 
     #[test]
