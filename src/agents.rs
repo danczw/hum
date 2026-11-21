@@ -193,6 +193,7 @@ pub fn tagged(base: &str, session: Option<&str>) -> String {
 /// taken twice in a group, or equal to a rank, fall back to the rank too.
 /// `agents` come in start order, `files` holds each one's [`session_file`].
 fn name_sessions(procs: &HashMap<Pid, ProcInfo>, agents: &mut [Agent], files: &[Option<String>]) {
+    debug_assert!(agents.is_sorted_by_key(|a| (a.procs[0].start, a.procs[0].pid)));
     let mut groups: HashMap<(&str, String), Vec<usize>> = HashMap::new();
     for (i, a) in agents.iter().enumerate() {
         groups
