@@ -101,8 +101,8 @@ pub struct Agent {
     pub project: String,
     /// The agent process first, then its descendants depth-first.
     pub procs: Vec<Proc>,
-    /// Set by [`BusyTracker::update`]; without [`Agent::reported`], false
-    /// until a window of samples exists.
+    /// Set by [`BusyTracker::update`]; true while a subagent runs, else
+    /// without [`Agent::reported`], false until a window of samples exists.
     pub busy: bool,
     /// Busy or idle as the agent itself reports it, see [`reported_busy`];
     /// None leaves `busy` to tree cpu.
@@ -850,11 +850,14 @@ impl BusyTracker {
             // sampled with a reported status too, so the fallback has a full
             // window if the status goes away
             window.push_back(agent.cpu());
-            agent.busy = agent.reported.unwrap_or_else(|| {
-                // cpu is in percent of one core
-                let mean = window.iter().sum::<f32>() / window.len() as f32 / 100.0;
-                window.len() == self.window && mean > BUSY_CORES
-            });
+            // the session may sit at its prompt while a background subagent
+            // works
+            agent.busy = !agent.subagents.is_empty()
+                || agent.reported.unwrap_or_else(|| {
+                    // cpu is in percent of one core
+                    let mean = window.iter().sum::<f32>() / window.len() as f32 / 100.0;
+                    window.len() == self.window && mean > BUSY_CORES
+                });
         }
     }
 }
@@ -1669,6 +1672,18 @@ mod tests {
         let file = r#"{"cwd":"/home/u/code/hum","sessionId":"14b4-39b0"}"#;
         let agents = scan(&HashMap::from([(pid, info)]), home(), files(&[(10, file)]));
         assert_eq!(agents[0].session_id.as_deref(), Some("14b4-39b0"));
+    }
+
+    #[test]
+    fn running_subagent_makes_an_idle_session_busy() {
+        let mut busy = BusyTracker::new(WINDOW);
+        let mut agents = reporting(0.0, "idle");
+        agents[0].subagents.push(Subagent {
+            id: "a1".into(),
+            kind: "Explore".into(),
+        });
+        busy.update(&mut agents);
+        assert!(agents[0].busy);
     }
 
     #[test]
