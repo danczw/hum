@@ -123,6 +123,11 @@ impl Agent {
         self.procs.iter().map(|p| p.mem).sum()
     }
 
+    /// The agent process itself, first of [`Agent::procs`].
+    pub fn root(&self) -> &Proc {
+        &self.procs[0]
+    }
+
     /// Whether the tree has rows below the agent: processes or subagents.
     pub fn has_children(&self) -> bool {
         self.procs.len() > 1 || !self.subagents.is_empty()
@@ -182,10 +187,10 @@ pub fn scan(
         .collect();
     // oldest first, so a new agent lands at the bottom and rows hold still
     // while agents work
-    agents.sort_by_key(|a| (a.procs[0].start, a.procs[0].pid));
+    agents.sort_by_key(|a| (a.root().start, a.root().pid));
     let files: Vec<Option<SessionFile>> = agents
         .iter()
-        .map(|a| session_file(&procs[&a.procs[0].pid], a.kind, &mut read_session))
+        .map(|a| session_file(&procs[&a.root().pid], a.kind, &mut read_session))
         .collect();
     name_sessions(procs, &mut agents, &files);
     for (agent, file) in agents.iter_mut().zip(files) {
@@ -207,7 +212,7 @@ fn name_sessions(
     agents: &mut [Agent],
     files: &[Option<SessionFile>],
 ) {
-    debug_assert!(agents.is_sorted_by_key(|a| (a.procs[0].start, a.procs[0].pid)));
+    debug_assert!(agents.is_sorted_by_key(|a| (a.root().start, a.root().pid)));
     let mut groups: HashMap<(&str, String), Vec<usize>> = HashMap::new();
     for (i, a) in agents.iter().enumerate() {
         groups
@@ -220,7 +225,7 @@ fn name_sessions(
             .iter()
             .map(|&i| {
                 let agent = &agents[i];
-                let info = &procs[&agent.procs[0].pid];
+                let info = &procs[&agent.root().pid];
                 let name = files[i].as_ref().and_then(|f| f.name.as_ref());
                 let given = match name {
                     Some(Name::Given(n)) => Some(n.clone()),
@@ -455,7 +460,7 @@ impl OrphanTracker {
         }
         // A nested agent whose parent agent exited is now a root, not an orphan.
         for agent in agents {
-            self.seen.remove(&agent.procs[0].pid);
+            self.seen.remove(&agent.root().pid);
         }
 
         let mut orphans: Vec<Orphan> = self
@@ -533,7 +538,7 @@ impl EnvOrphans {
                     .get(&agent)
                     .filter(|a| a.start <= p.start && agent_kind(&a.name, &a.cmd) == Some(kind));
                 let session = agent
-                    .and_then(|a| agents.iter().find(|r| r.procs[0].pid == a.pid))
+                    .and_then(|a| agents.iter().find(|r| r.root().pid == a.pid))
                     .and_then(|r| r.session.clone());
                 Some(Orphan {
                     pid: p.pid,
@@ -628,11 +633,11 @@ impl BusyTracker {
     pub fn update(&mut self, agents: &mut [Agent]) {
         let roots: HashSet<Key> = agents
             .iter()
-            .map(|a| key(a.procs[0].pid, a.procs[0].start))
+            .map(|a| key(a.root().pid, a.root().start))
             .collect();
         self.samples.retain(|root, _| roots.contains(root));
         for agent in agents {
-            let root = &agent.procs[0];
+            let root = agent.root();
             let window = self.samples.entry(key(root.pid, root.start)).or_default();
             if window.len() == self.window {
                 window.pop_front();
@@ -687,7 +692,7 @@ impl Sessions {
         if let Some(claude) = claude {
             for agent in &mut agents {
                 if let Some(id) = &agent.session_id {
-                    let cwd = procs[&agent.procs[0].pid].cwd.as_deref();
+                    let cwd = procs[&agent.root().pid].cwd.as_deref();
                     agent.subagents = claude::running_subagents(claude, cwd, id, now);
                 }
             }
@@ -830,7 +835,7 @@ mod tests {
         let roots = |procs: HashMap<Pid, ProcInfo>| -> Vec<u32> {
             scan(&procs, home(), no_session)
                 .iter()
-                .map(|a| a.procs[0].pid.as_u32())
+                .map(|a| a.root().pid.as_u32())
                 .collect()
         };
         // pid 5 started last, so a reused low pid does not move it up
@@ -917,7 +922,7 @@ mod tests {
 
         let procs = HashMap::from([proc(11, 1, 101, "bash"), proc(12, 11, 102, "codex")]);
         let agents = scan(&procs, home(), no_session);
-        assert_eq!(agents[0].procs[0].pid.as_u32(), 12);
+        assert_eq!(agents[0].root().pid.as_u32(), 12);
         assert_eq!(pids(&tracker.update(&procs, &agents)), [11]);
     }
 
@@ -1218,7 +1223,7 @@ mod tests {
     /// Labels by root pid.
     fn labels(agents: &[Agent]) -> Vec<String> {
         let mut agents: Vec<&Agent> = agents.iter().collect();
-        agents.sort_by_key(|a| a.procs[0].pid);
+        agents.sort_by_key(|a| a.root().pid);
         agents.iter().map(|a| a.label().to_string()).collect()
     }
 
