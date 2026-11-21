@@ -9,15 +9,14 @@ mod trees;
 mod ui;
 
 use std::io;
-use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime};
 
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
-use agents::{Agent, BusyTracker, EnvOrphans, Orphan, OrphanTracker};
+use agents::{Agent, Orphan, Sessions};
 use cli::Action;
 use focus::Focus;
 use ports::Listener;
@@ -32,14 +31,9 @@ const CPU_SETTLE: Duration = Duration::from_millis(200);
 
 struct App {
     sys: System,
-    home: Option<PathBuf>,
-    /// See [`claude::config`].
-    claude: Option<PathBuf>,
     ticks: u32,
+    sessions: Sessions,
     agents: Vec<Agent>,
-    busy: BusyTracker,
-    tracker: OrphanTracker,
-    env: EnvOrphans,
     orphans: Vec<Orphan>,
     ports: Vec<Listener>,
     tick: Duration,
@@ -48,15 +42,12 @@ struct App {
 impl App {
     fn new(tick: Duration) -> io::Result<Self> {
         let home = agents::canonical_home(std::env::var_os("HOME"));
+        let claude = claude::config(std::env::var_os("CLAUDE_CONFIG_DIR"), home.as_deref());
         Ok(Self {
             sys: System::new().map_err(io::Error::other)?,
-            claude: claude::config(std::env::var_os("CLAUDE_CONFIG_DIR"), home.as_deref()),
-            home,
             ticks: 0,
+            sessions: Sessions::new(home, claude, tick),
             agents: Vec::new(),
-            busy: BusyTracker::new(agents::busy_window(tick)),
-            tracker: OrphanTracker::default(),
-            env: EnvOrphans::new(Pid::from_u32(std::process::id())),
             orphans: Vec::new(),
             ports: Vec::new(),
             tick,
@@ -82,26 +73,7 @@ impl App {
                 .without_tasks(),
         );
         let procs = agents::snapshot(&self.sys);
-        let claude = self.claude.as_deref();
-        self.agents = agents::scan(&procs, self.home.as_deref(), |pid| {
-            claude::read_session(claude?, pid)
-        });
-        if let Some(claude) = claude {
-            let now = SystemTime::now();
-            for agent in &mut self.agents {
-                if let Some(id) = &agent.session_id {
-                    let cwd = procs[&agent.procs[0].pid].cwd.as_deref();
-                    agent.subagents = claude::running_subagents(claude, cwd, id, now);
-                }
-            }
-        }
-        self.busy.update(&mut self.agents);
-        let home = self.home.as_deref();
-        self.orphans = agents::merge(
-            self.tracker.update(&procs, &self.agents),
-            self.env
-                .update(&procs, &self.agents, home, agents::read_environ),
-        );
+        (self.agents, self.orphans) = self.sessions.observe(&procs, SystemTime::now());
         if self.ticks.is_multiple_of(PORT_TICKS) {
             self.ports = ports::listening(&procs);
         } else {
