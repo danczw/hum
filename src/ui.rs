@@ -482,7 +482,9 @@ fn agents_section(agents: &[Agent], trees: &Trees, width: u16, theme: &Theme) ->
             rows.push(Row::new(columns(
                 [
                     Cell::from(cut(
-                        &format!("{}└ {}", "  ".repeat(p.depth - 1), p.name),
+                        // past the agent's status dot, so an agent without
+                        // a fold marker never reads as a child
+                        &format!("{}└ {}", "  ".repeat(p.depth + 1), p.name),
                         process_max,
                     )),
                     // Cell::default() spans zero columns and would shift the rest.
@@ -1600,7 +1602,7 @@ mod tests {
             lines[2]
         );
         assert!(
-            lines.iter().any(|l| l.starts_with("│   └ rust-an… ")),
+            lines.iter().any(|l| l.starts_with("│     └ rust-… ")),
             "{lines:#?}"
         );
         let pid_end = |pid: &str| {
@@ -1614,6 +1616,23 @@ mod tests {
         );
         // the orphan row keeps its whole `from`
         assert!(lines[4].contains("claude/hum"), "{}", lines[4]);
+    }
+
+    #[test]
+    fn agents_below_an_open_tree_keep_their_column() {
+        let mut procs = mockup();
+        procs.extend([
+            child_proc(9169, 4123, "bash"),
+            child_proc(9342, 9169, "cargo"),
+        ]);
+        let lines = draw_lines((74, 16), procs);
+        let col = |line: &str, glyphs: &[char]| line.chars().position(|c| glyphs.contains(&c));
+        let dots: Vec<usize> = lines.iter().filter_map(|l| col(l, &['●', '○'])).collect();
+        assert_eq!(dots.len(), 3, "{lines:#?}");
+        assert!(dots.iter().all(|&c| c == dots[0]), "{lines:#?}");
+        let kids: Vec<usize> = lines.iter().filter_map(|l| col(l, &['└'])).collect();
+        assert_eq!(kids.len(), 2, "{lines:#?}");
+        assert!(kids.iter().all(|&c| c > dots[0]), "{lines:#?}");
     }
 
     #[test]
