@@ -8,11 +8,11 @@ use ratatui::widgets::{
 };
 use sysinfo::Pid;
 
-use crate::App;
-use crate::agents::{self, Agent, Orphan, Owner};
+use crate::agents::{Agent, Orphan, Owner};
 use crate::focus::{self, Focus, Key, key};
 use crate::label::cut;
 use crate::outline::{self, Entry, Fold, Outline};
+use crate::ports::Holder;
 use crate::theme::Theme;
 
 // Numbers get fixed widths and text columns fill what is left, so a narrow
@@ -119,29 +119,45 @@ impl View {
     }
 }
 
-/// Everything one frame shows, read out of [`App`] so drawing needs no
+/// Everything one frame shows, filled once per tick so drawing reads no
 /// `System`.
-struct Screen<'a> {
-    /// 0.0 to 1.0.
-    cpu: f64,
-    /// Each core's use, 0.0 to 1.0.
-    cores: Vec<f64>,
-    /// (used, total) bytes.
-    mem: (u64, u64),
-    swap: (u64, u64),
-    agents: &'a [Agent],
-    orphans: &'a [Orphan],
-    ports: Vec<PortRow>,
+pub struct Snapshot {
+    pub gauges: Gauges,
+    pub agents: Vec<Agent>,
+    pub orphans: Vec<Orphan>,
+    pub ports: Vec<Port>,
 }
 
-struct PortRow {
-    port: u16,
-    pid: Option<Pid>,
+/// The gauge line and the per-core grid.
+pub struct Gauges {
+    /// 0.0 to 1.0.
+    pub cpu: f64,
+    /// Each core's use, 0.0 to 1.0.
+    pub cores: Vec<f64>,
+    /// (used, total) bytes.
+    pub mem: (u64, u64),
+    pub swap: (u64, u64),
+}
+
+pub struct Port {
+    pub port: u16,
     /// Bound beyond loopback; marked `*`.
-    public: bool,
-    name: String,
-    /// The session or orphan holding the port; see [`agents::owner`].
-    owner: Option<Owner>,
+    pub public: bool,
+    /// None when the socket's holder is unreadable.
+    pub holder: Option<Holder>,
+    /// The session or orphan holding the port; see [`crate::agents::owner`].
+    pub owner: Option<Owner>,
+}
+
+impl Port {
+    fn pid(&self) -> Option<Pid> {
+        self.holder.as_ref().map(|h| h.pid)
+    }
+
+    /// Empty when the holder is unreadable.
+    fn name(&self) -> &str {
+        self.holder.as_ref().map_or("", |h| &h.name)
+    }
 }
 
 /// A titled list of rows under a dim header naming the columns.
@@ -163,64 +179,20 @@ struct Section {
     inline: Vec<Line<'static>>,
 }
 
-pub fn draw(frame: &mut Frame, app: &App, view: &mut View) {
-    render(frame, &screen(app, view.cores), view);
-}
-
-/// Reads each core's use only when `cores`, so the grid costs nothing while
-/// it is off.
-fn screen(app: &App, cores: bool) -> Screen<'_> {
-    let sys = &app.sys;
-    let ports = app
-        .ports
-        .iter()
-        .map(|l| PortRow {
-            port: l.port,
-            pid: l.pid(),
-            public: l.public,
-            name: l
-                .holder
-                .as_ref()
-                .map(|h| h.name.clone())
-                .unwrap_or_default(),
-            owner: l
-                .holder
-                .as_ref()
-                .and_then(|h| agents::owner(&app.agents, &app.orphans, h.pid, h.start)),
-        })
-        .collect();
-    Screen {
-        cpu: f64::from(sys.global_cpu_usage()) / 100.0,
-        cores: if cores {
-            sys.cpus()
-                .iter()
-                .map(|c| f64::from(c.usage()) / 100.0)
-                .collect()
-        } else {
-            Vec::new()
-        },
-        mem: (sys.used_memory(), sys.total_memory()),
-        swap: (sys.used_swap(), sys.total_swap()),
-        agents: &app.agents,
-        orphans: &app.orphans,
-        ports,
-    }
-}
-
-fn render(frame: &mut Frame, screen: &Screen, view: &mut View) {
-    view.sync(screen.agents);
+pub fn draw(frame: &mut Frame, snapshot: &Snapshot, view: &mut View) {
+    view.sync(&snapshot.agents);
     let theme = &view.theme;
     let focus = &mut view.focus;
     let area = frame.area();
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         let [gauges, hint] = Layout::vertical([Constraint::Length(1); 2]).areas(area);
-        draw_gauges(frame, screen, gauges, theme);
+        draw_gauges(frame, &snapshot.gauges, gauges, theme);
         frame.render_widget(Line::styled("too small", theme.dim), hint);
         return;
     }
     let grid = view
         .cores
-        .then(|| CoreGrid::new(screen.cores.len(), area.width));
+        .then(|| CoreGrid::new(snapshot.gauges.cores.len(), area.width));
     // the rows compact sections need for their titles: three stacked, two
     // side by side
     let titles = if area.width >= WIDE { 2 } else { 3 };
@@ -236,19 +208,19 @@ fn render(frame: &mut Frame, screen: &Screen, view: &mut View) {
         Constraint::Fill(1),
     ])
     .areas(area);
-    draw_gauges(frame, screen, gauges, theme);
+    draw_gauges(frame, &snapshot.gauges, gauges, theme);
     if let Some(grid) = grid {
-        draw_cores(frame, &screen.cores, grid, cores, theme);
+        draw_cores(frame, &snapshot.gauges.cores, grid, cores, theme);
     }
 
-    let ports = |width| ports_section(&screen.ports, view.all_ports, width, theme);
-    let rows = view.outline.rows(screen.agents);
+    let ports = |width| ports_section(&snapshot.ports, view.all_ports, width, theme);
+    let rows = view.outline.rows(&snapshot.agents);
     if body.width >= WIDE {
         let side = (body.width * 2 / 5).max(SIDE_MIN);
         let [left, right] =
             Layout::horizontal([Constraint::Fill(1), Constraint::Length(side)]).areas(body);
         let agents = agents_section(&rows, left.width, theme);
-        let orphans = orphans_section(screen.orphans, right.width, theme);
+        let orphans = orphans_section(&snapshot.orphans, right.width, theme);
         stack(frame, [agents], left, compact, theme, focus);
         stack(
             frame,
@@ -260,7 +232,7 @@ fn render(frame: &mut Frame, screen: &Screen, view: &mut View) {
         );
     } else {
         let agents = agents_section(&rows, body.width, theme);
-        let orphans = orphans_section(screen.orphans, body.width, theme);
+        let orphans = orphans_section(&snapshot.orphans, body.width, theme);
         let ports = ports(body.width);
         stack(frame, [agents, orphans, ports], body, compact, theme, focus);
     }
@@ -275,17 +247,17 @@ fn render(frame: &mut Frame, screen: &Screen, view: &mut View) {
 /// line, bracketed as in htop. The bars share one length so they compare at
 /// a glance, and stretch to fill the line. The unused part stays blank, no
 /// track. Each bar takes one color from its load.
-fn draw_gauges(frame: &mut Frame, screen: &Screen, area: Rect, theme: &Theme) {
+fn draw_gauges(frame: &mut Frame, gauges: &Gauges, area: Rect, theme: &Theme) {
     let gauges = [
         (
             "cpu",
-            screen.cpu,
+            gauges.cpu,
             // as wide as `100` so the bars do not jitter
-            format!("{:>3.0}", screen.cpu * 100.0),
+            format!("{:>3.0}", gauges.cpu * 100.0),
             "%",
         ),
-        ("mem", ratio(screen.mem), usage_label(screen.mem), "G"),
-        ("swp", ratio(screen.swap), usage_label(screen.swap), "G"),
+        ("mem", ratio(gauges.mem), usage_label(gauges.mem), "G"),
+        ("swp", ratio(gauges.swap), usage_label(gauges.swap), "G"),
     ];
     // name, ` ⎣`, bar, space, value, unit, `⎦`
     let text = |(name, _, value, unit): &(&str, f64, String, &str)| {
@@ -577,12 +549,12 @@ fn columns<T>(columns: [T; 5], cores: bool) -> Vec<T> {
 /// Only ports of agents and orphans unless `all`. A port bound beyond
 /// loopback gets a `*`, which warns when an agent or orphan owns it.
 /// `width` is the whole box.
-fn ports_section(ports: &[PortRow], all: bool, width: u16, theme: &Theme) -> Section {
+fn ports_section(ports: &[Port], all: bool, width: u16, theme: &Theme) -> Section {
     // process and agent split the rest 1:2; the floor never overshoots
     let agent_max = usize::from(width.saturating_sub(PORTS_FIXED)) * 2 / 3;
-    let shown: Vec<&PortRow> = ports.iter().filter(|p| all || p.owner.is_some()).collect();
+    let shown: Vec<&Port> = ports.iter().filter(|p| all || p.owner.is_some()).collect();
     // `:3000*`
-    let port = |p: &PortRow| {
+    let port = |p: &Port| {
         let star = match (p.public, p.owner.is_some()) {
             (false, _) => None,
             (true, true) => Some(Span::styled("*", theme.warn)),
@@ -597,8 +569,8 @@ fn ports_section(ports: &[PortRow], all: bool, width: u16, theme: &Theme) -> Sec
         .map(|p| {
             Row::new([
                 Cell::from(Line::from(port(p))),
-                num(p.pid.map_or_else(|| "-".into(), |p| p.to_string())),
-                Cell::from(p.name.clone()),
+                num(p.pid().map_or_else(|| "-".into(), |p| p.to_string())),
+                Cell::from(p.name().to_string()),
                 Cell::from(
                     p.owner
                         .as_ref()
@@ -622,7 +594,7 @@ fn ports_section(ports: &[PortRow], all: bool, width: u16, theme: &Theme) -> Sec
         rows,
         keys: shown
             .iter()
-            .map(|p| (u64::from(p.port), p.pid.map_or(0, |p| p.as_u32().into())))
+            .map(|p| (u64::from(p.port), p.pid().map_or(0, |p| p.as_u32().into())))
             .collect(),
         widths: vec![
             // `:65535*`
@@ -637,7 +609,7 @@ fn ports_section(ports: &[PortRow], all: bool, width: u16, theme: &Theme) -> Sec
             .map(|p| {
                 let mut spans = port(p);
                 spans.extend(
-                    std::iter::once(p.name.clone())
+                    std::iter::once(p.name().to_string())
                         .chain(p.owner.as_ref().map(Owner::to_string))
                         .filter(|s| !s.is_empty())
                         .map(|s| Span::raw(format!(" {s}"))),
@@ -1090,6 +1062,44 @@ mod tests {
         })
     }
 
+    /// The mockup's gauge line over `cores`.
+    fn gauges(cores: Vec<f64>) -> Gauges {
+        Gauges {
+            cpu: 0.34,
+            cores,
+            mem: (GIB * 121 / 10, 31 * GIB),
+            swap: (GIB / 1000, 8 * GIB),
+        }
+    }
+
+    fn port(port: u16, pid: u32, name: &str, owner: Option<Owner>) -> Port {
+        Port {
+            port,
+            public: false,
+            holder: Some(Holder {
+                pid: Pid::from_u32(pid),
+                start: 0,
+                name: name.into(),
+            }),
+            owner,
+        }
+    }
+
+    /// Draws `ports` with no agents or orphans.
+    fn draw_ports(size: (u16, u16), ports: Vec<Port>) -> Vec<String> {
+        let snapshot = Snapshot {
+            gauges: gauges(eight_cores()),
+            agents: Vec::new(),
+            orphans: Vec::new(),
+            ports,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(size.0, size.1)).unwrap();
+        terminal
+            .draw(|f| super::draw(f, &snapshot, &mut view()))
+            .unwrap();
+        text(terminal.backend().buffer())
+    }
+
     fn draw_cores_view(
         (width, height): (u16, u16),
         procs: Vec<(Pid, ProcInfo)>,
@@ -1099,7 +1109,7 @@ mod tests {
         let procs: HashMap<Pid, ProcInfo> = procs.into_iter().collect();
         draw_agents(
             (width, height),
-            &agents::scan(&procs, None, |_| None),
+            agents::scan(&procs, None, |_| None),
             cores,
             view,
         )
@@ -1107,11 +1117,11 @@ mod tests {
 
     fn draw_agents(
         (width, height): (u16, u16),
-        agents: &[Agent],
+        agents: Vec<Agent>,
         cores: Vec<f64>,
         view: &mut View,
     ) -> Buffer {
-        let orphans = [Orphan {
+        let orphans = vec![Orphan {
             pid: Pid::from_u32(9120),
             name: "node".into(),
             from: claude("hum", None),
@@ -1119,39 +1129,21 @@ mod tests {
             cpu: 0.0,
             mem: 48 << 20,
         }];
-        let screen = Screen {
-            cpu: 0.34,
-            cores,
-            mem: (GIB * 121 / 10, 31 * GIB),
-            swap: (GIB / 1000, 8 * GIB),
+        let snapshot = Snapshot {
+            gauges: gauges(cores),
             agents,
-            orphans: &orphans,
+            orphans,
             ports: vec![
-                PortRow {
-                    port: 3000,
-                    pid: Some(Pid::from_u32(9120)),
+                Port {
                     public: true,
-                    name: "node".into(),
-                    owner: agent_owner("hum", None),
+                    ..port(3000, 9120, "node", agent_owner("hum", None))
                 },
-                PortRow {
-                    port: 5432,
-                    pid: None,
-                    public: false,
-                    name: "postgres".into(),
-                    owner: None,
-                },
-                PortRow {
-                    port: 8000,
-                    pid: Some(Pid::from_u32(5871)),
-                    public: false,
-                    name: "python".into(),
-                    owner: agent_owner("infra", None),
-                },
+                port(5432, 1342, "postgres", None),
+                port(8000, 5871, "python", agent_owner("infra", None)),
             ],
         };
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|f| render(f, &screen, view)).unwrap();
+        terminal.draw(|f| super::draw(f, &snapshot, view)).unwrap();
         terminal.backend().buffer().clone()
     }
 
@@ -1255,7 +1247,7 @@ mod tests {
             busy.update(&mut agents);
         }
         let mut view = View { theme, ..view() };
-        let buf = draw_agents((74, 16), &agents, eight_cores(), &mut view);
+        let buf = draw_agents((74, 16), agents, eight_cores(), &mut view);
         assert_eq!(fg_at(&buf, "│   ● claude", 4), fg(theme.accent));
         assert_eq!(fg_at(&buf, "│   ○ codex", 4), fg(theme.dim));
     }
@@ -1369,11 +1361,10 @@ mod tests {
 
     #[test]
     fn public_port_without_an_agent_gets_a_plain_star() {
-        let ports = [PortRow {
+        let ports = [Port {
             port: 22,
-            pid: None,
             public: true,
-            name: "sshd".into(),
+            holder: None,
             owner: None,
         }];
         let theme = Theme::ayu_mirage();
@@ -1384,26 +1375,9 @@ mod tests {
 
     #[test]
     fn narrow_ports_box_keeps_the_session() {
-        let port = |port, session: &str| PortRow {
-            port,
-            pid: None,
-            public: false,
-            name: "node".into(),
-            owner: agent_owner("hum", Some(session)),
-        };
-        let screen = Screen {
-            cpu: 0.0,
-            cores: eight_cores(),
-            mem: (GIB, 8 * GIB),
-            swap: (0, GIB),
-            agents: &[],
-            orphans: &[],
-            ports: vec![port(3000, "gate"), port(3001, "exec")],
-        };
+        let port = |p, session| port(p, 9120, "node", agent_owner("hum", Some(session)));
         // 40 wide leaves the agent column 12 chars, less than `claude/hum·gate`
-        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
-        terminal.draw(|f| render(f, &screen, &mut view())).unwrap();
-        let lines = text(terminal.backend().buffer());
+        let lines = draw_ports((40, 20), vec![port(3000, "gate"), port(3001, "exec")]);
         for label in ["claude…·gate", "claude…·exec"] {
             assert!(
                 lines.iter().any(|l| l.contains(label)),
@@ -1414,29 +1388,13 @@ mod tests {
 
     #[test]
     fn narrow_ports_box_keeps_the_orphan_prefix() {
-        let screen = Screen {
-            cpu: 0.0,
-            cores: eight_cores(),
-            mem: (GIB, 8 * GIB),
-            swap: (0, GIB),
-            agents: &[],
-            orphans: &[],
-            ports: vec![PortRow {
-                port: 3000,
-                pid: None,
-                public: false,
-                name: "node".into(),
-                owner: Some(Owner {
-                    label: claude("hum", Some("gate")),
-                    orphan: true,
-                }),
-            }],
+        let owner = Owner {
+            label: claude("hum", Some("gate")),
+            orphan: true,
         };
         // the 12-char agent column fits `orphan:` and the session, not the
         // label between them
-        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
-        terminal.draw(|f| render(f, &screen, &mut view())).unwrap();
-        let lines = text(terminal.backend().buffer());
+        let lines = draw_ports((40, 20), vec![port(3000, 9120, "node", Some(owner))]);
         assert!(
             lines.iter().any(|l| l.contains(" orphan:·gate ")),
             "{lines:#?}"
@@ -1445,12 +1403,9 @@ mod tests {
 
     #[test]
     fn filter_hiding_nothing_counts_plainly() {
-        let ports = [PortRow {
-            port: 3000,
-            pid: None,
+        let ports = [Port {
             public: true,
-            name: "node".into(),
-            owner: agent_owner("hum", None),
+            ..port(3000, 9120, "node", agent_owner("hum", None))
         }];
         let section = ports_section(&ports, false, 74, &Theme::ayu_mirage());
         assert_eq!((section.count, section.total), (1, None));
@@ -1782,11 +1737,11 @@ mod tests {
     fn subagents_show_above_the_processes_of_their_agent() {
         let agents = with_subagents();
         let mut view = view();
-        let buf = draw_agents((74, 16), &agents, eight_cores(), &mut view);
+        let buf = draw_agents((74, 16), with_subagents(), eight_cores(), &mut view);
         let lines = text(&buf);
         assert!(lines[4].starts_with("│ ▸ ○ claude (4) "), "{lines:#?}");
         view.outline.expand_all(&agents);
-        let lines = text(&draw_agents((74, 16), &agents, eight_cores(), &mut view));
+        let lines = text(&draw_agents((74, 16), agents, eight_cores(), &mut view));
         assert!(lines[5].starts_with("│     ◇ Explore  "), "{lines:#?}");
         assert!(lines[6].starts_with("│     ◇ code-review  "), "{lines:#?}");
         assert!(lines[7].starts_with("│     └ bash "), "{lines:#?}");
@@ -1802,7 +1757,7 @@ mod tests {
         let agents = with_subagents();
         let mut view = view();
         view.outline.expand_all(&agents);
-        let lines = text(&draw_agents((74, 10), &agents, eight_cores(), &mut view));
+        let lines = text(&draw_agents((74, 10), agents, eight_cores(), &mut view));
         assert!(lines.iter().any(|l| l.contains("◇ Explore")), "{lines:#?}");
     }
 
@@ -1812,7 +1767,7 @@ mod tests {
         agents[0].subagents = with_subagents().remove(0).subagents;
         let mut view = view();
         view.outline.expand_all(&agents);
-        let lines = text(&draw_agents((74, 16), &agents, eight_cores(), &mut view));
+        let lines = text(&draw_agents((74, 16), agents, eight_cores(), &mut view));
         assert!(lines[4].starts_with("│ ▾ ○ claude "), "{lines:#?}");
         assert!(lines[5].starts_with("│     ◇ Explore "), "{lines:#?}");
     }

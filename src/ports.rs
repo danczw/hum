@@ -19,6 +19,7 @@ pub struct Listener {
 
 /// The process holding a listen socket; start time guards against pid
 /// reuse.
+#[derive(Clone)]
 pub struct Holder {
     pub pid: Pid,
     pub start: u64,

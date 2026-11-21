@@ -16,13 +16,13 @@ use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
-use agents::{Agent, Orphan, Sessions};
+use agents::Sessions;
 use cli::Action;
 use focus::Focus;
 use outline::{Fold, Outline};
 use ports::Listener;
 use theme::Theme;
-use ui::View;
+use ui::{Gauges, Port, Snapshot, View};
 
 /// Ports change rarely and resolving owners reads every fd in /proc.
 const PORT_TICKS: u32 = 5;
@@ -33,8 +33,6 @@ struct App {
     sys: System,
     ticks: u32,
     sessions: Sessions,
-    agents: Vec<Agent>,
-    orphans: Vec<Orphan>,
     ports: Vec<Listener>,
     tick: Duration,
 }
@@ -47,14 +45,12 @@ impl App {
             sys: System::new().map_err(io::Error::other)?,
             ticks: 0,
             sessions: Sessions::new(home, claude, tick),
-            agents: Vec::new(),
-            orphans: Vec::new(),
             ports: Vec::new(),
             tick,
         })
     }
 
-    fn refresh(&mut self) {
+    fn refresh(&mut self) -> Snapshot {
         self.sys.refresh_cpu_usage();
         self.sys.refresh_memory();
         self.sys.refresh_processes_specifics(
@@ -73,13 +69,49 @@ impl App {
                 .without_tasks(),
         );
         let procs = agents::snapshot(&self.sys);
-        (self.agents, self.orphans) = self.sessions.observe(&procs, SystemTime::now());
+        let (agents, orphans) = self.sessions.observe(&procs, SystemTime::now());
         if self.ticks.is_multiple_of(PORT_TICKS) {
             self.ports = ports::listening(&procs);
         } else {
             ports::join(&mut self.ports, &procs);
         }
         self.ticks = self.ticks.wrapping_add(1);
+        let ports = self
+            .ports
+            .iter()
+            .map(|l| Port {
+                port: l.port,
+                public: l.public,
+                holder: l.holder.clone(),
+                owner: l
+                    .holder
+                    .as_ref()
+                    .and_then(|h| agents::owner(&agents, &orphans, h.pid, h.start)),
+            })
+            .collect();
+        Snapshot {
+            gauges: Gauges::read(&self.sys),
+            agents,
+            orphans,
+            ports,
+        }
+    }
+}
+
+impl Gauges {
+    /// The only read of `System` for drawing. Reads every core each tick so
+    /// the grid shows as soon as it is toggled.
+    fn read(sys: &System) -> Self {
+        Self {
+            cpu: f64::from(sys.global_cpu_usage()) / 100.0,
+            cores: sys
+                .cpus()
+                .iter()
+                .map(|c| f64::from(c.usage()) / 100.0)
+                .collect(),
+            mem: (sys.used_memory(), sys.total_memory()),
+            swap: (sys.used_swap(), sys.total_swap()),
+        }
     }
 }
 
@@ -120,14 +152,14 @@ fn main() -> io::Result<ExitCode> {
 fn run(mut terminal: DefaultTerminal, app: &mut App, view: &mut View) -> io::Result<()> {
     // stamped before the refresh so its run time does not stretch the period
     let mut last_tick = Instant::now();
-    app.refresh();
+    let mut snapshot = app.refresh();
     // the second refresh comes early so cpu shows before a long tick ends
     let mut period = app.tick.min(CPU_SETTLE);
 
     loop {
         if last_tick.elapsed() >= period {
             last_tick = Instant::now();
-            app.refresh();
+            snapshot = app.refresh();
             period = app.tick;
             // a refresh slower than the tick restarts it, so hum still idles a full tick
             if last_tick.elapsed() >= period {
@@ -135,7 +167,7 @@ fn run(mut terminal: DefaultTerminal, app: &mut App, view: &mut View) -> io::Res
             }
         }
 
-        terminal.draw(|frame| ui::draw(frame, app, view))?;
+        terminal.draw(|frame| ui::draw(frame, &snapshot, view))?;
 
         let timeout = period.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)?
@@ -143,7 +175,7 @@ fn run(mut terminal: DefaultTerminal, app: &mut App, view: &mut View) -> io::Res
             && key.kind == KeyEventKind::Press
         {
             let focus = &mut view.focus;
-            let agents = &app.agents;
+            let agents = &snapshot.agents;
             match key.code {
                 KeyCode::Esc if view.help => view.help = false,
                 KeyCode::Esc if focus.clear() => {}
