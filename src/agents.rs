@@ -153,12 +153,8 @@ pub fn scan(
         })
         .collect();
     name_sessions(procs, &mut agents, read_session);
-    // busiest first; pid keeps idle sessions in a steady order
-    agents.sort_by(|a, b| {
-        b.cpu()
-            .total_cmp(&a.cpu())
-            .then(a.procs[0].pid.cmp(&b.procs[0].pid))
-    });
+    // oldest first, so a row moves only when an agent above it exits
+    agents.sort_by_key(|a| (a.procs[0].start, a.procs[0].pid));
     agents
 }
 
@@ -825,22 +821,27 @@ mod tests {
     }
 
     #[test]
-    fn busiest_session_sorts_first() {
+    fn sessions_keep_start_order_as_cpu_changes() {
         let busy = |(pid, mut info): (Pid, ProcInfo), cpu| {
             info.cpu = cpu;
             (pid, info)
         };
-        let procs = HashMap::from([
-            proc(10, 1, 100, "claude"),
-            proc(20, 1, 200, "claude"),
-            busy(proc(21, 20, 201, "cargo"), 50.0),
-            proc(30, 1, 300, "codex"),
-        ]);
-        let roots: Vec<u32> = scan(&procs, home(), no_session)
-            .iter()
-            .map(|a| a.procs[0].pid.as_u32())
-            .collect();
-        assert_eq!(roots, [20, 10, 30]);
+        let roots = |procs: HashMap<Pid, ProcInfo>| -> Vec<u32> {
+            scan(&procs, home(), no_session)
+                .iter()
+                .map(|a| a.procs[0].pid.as_u32())
+                .collect()
+        };
+        // pid 5 started last, so a reused low pid does not move it up
+        let tick = |a, b| {
+            HashMap::from([
+                busy(proc(20, 1, 100, "claude"), a),
+                busy(proc(10, 1, 200, "claude"), b),
+                proc(5, 1, 300, "codex"),
+            ])
+        };
+        assert_eq!(roots(tick(0.0, 50.0)), [20, 10, 5]);
+        assert_eq!(roots(tick(50.0, 0.0)), [20, 10, 5]);
     }
 
     #[test]
