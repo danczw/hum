@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -8,6 +9,7 @@ use std::time::{Duration, SystemTime};
 use sysinfo::{Pid, Process, System};
 
 use crate::focus::{Key, key};
+use crate::label::Label;
 
 /// Process names that mark the root of an agent session.
 const AGENTS: &[&str] = &[
@@ -138,6 +140,14 @@ impl Agent {
     pub fn has_children(&self) -> bool {
         self.procs.len() > 1 || !self.subagents.is_empty()
     }
+
+    pub fn label(&self) -> Label {
+        Label {
+            kind: self.kind,
+            project: Some(self.project.clone()),
+            session: self.session.clone(),
+        }
+    }
 }
 
 /// `read_session` returns a claude pid's raw session file, see
@@ -196,20 +206,6 @@ pub fn scan(
     }
     name_sessions(procs, &mut agents, &files);
     agents
-}
-
-/// `<kind>/<project>`, the label of a session without its name.
-pub fn base_label(kind: &str, project: &str) -> String {
-    format!("{kind}/{project}")
-}
-
-/// `<base>·<session>`, or `base` alone without a session, e.g.
-/// `claude/hum·gate` for a session that shares its project.
-pub fn tagged(base: &str, session: Option<&str>) -> String {
-    match session {
-        Some(s) => format!("{base}·{s}"),
-        None => base.to_string(),
-    }
 }
 
 /// Names each agent that shares its kind and project with another one.
@@ -649,13 +645,44 @@ fn project(cwd: Option<&Path>, home: Option<&Path>) -> String {
 pub struct Orphan {
     pub pid: Pid,
     pub name: String,
-    /// The session that spawned it as `<kind>/<project>`.
-    pub from: String,
-    /// The spawning session's [`Agent::session`].
-    pub session: Option<String>,
+    /// The session that spawned it.
+    pub from: Label,
     pub start: u64,
     pub cpu: f32,
     pub mem: u64,
+}
+
+/// The session a port's process belongs to: `claude/hum`, or
+/// `orphan:claude/hum` when the process outlived it.
+#[derive(Debug, PartialEq)]
+pub struct Owner {
+    pub label: Label,
+    pub orphan: bool,
+}
+
+impl Owner {
+    const ORPHAN: &str = "orphan:";
+
+    /// Up to `max` chars; a cut shortens the label and keeps `orphan:`
+    /// whole.
+    pub fn fit(&self, max: usize) -> String {
+        match self.orphan {
+            true => {
+                let room = max.saturating_sub(Self::ORPHAN.len());
+                format!("{}{}", Self::ORPHAN, self.label.fit(room))
+            }
+            false => self.label.fit(max),
+        }
+    }
+}
+
+impl fmt::Display for Owner {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if self.orphan {
+            f.write_str(Self::ORPHAN)?;
+        }
+        write!(f, "{}", self.label)
+    }
 }
 
 /// Remembers which processes agents spawned, to spot the ones left behind.
@@ -663,24 +690,22 @@ pub struct Orphan {
 /// it covers agents without a [`MARKERS`] entry.
 #[derive(Default)]
 pub struct OrphanTracker {
-    /// pid -> (spawning session's `<kind>/<project>`, its session name,
-    /// start time); start time guards against pid reuse.
-    /// The names are stored so they survive the agent exiting.
-    seen: HashMap<Pid, (String, Option<String>, u64)>,
+    /// pid -> (spawning session, start time); start time guards against
+    /// pid reuse. The label is stored so it survives the agent exiting.
+    seen: HashMap<Pid, (Label, u64)>,
 }
 
 impl OrphanTracker {
     pub fn update(&mut self, procs: &HashMap<Pid, ProcInfo>, agents: &[Agent]) -> Vec<Orphan> {
         self.seen
-            .retain(|pid, (_, _, start)| procs.get(pid).is_some_and(|p| p.start == *start));
+            .retain(|pid, (_, start)| procs.get(pid).is_some_and(|p| p.start == *start));
 
         let mut current = HashSet::new();
         for agent in agents {
-            let base = base_label(agent.kind, &agent.project);
+            let label = agent.label();
             for p in &agent.procs[1..] {
                 current.insert(p.pid);
-                let session = agent.session.clone();
-                self.seen.insert(p.pid, (base.clone(), session, p.start));
+                self.seen.insert(p.pid, (label.clone(), p.start));
             }
         }
         // A nested agent whose parent agent exited is now a root, not an orphan.
@@ -692,13 +717,12 @@ impl OrphanTracker {
             .seen
             .iter()
             .filter(|(pid, _)| !current.contains(pid))
-            .filter_map(|(pid, (from, session, start))| {
+            .filter_map(|(pid, (from, start))| {
                 let p = procs.get(pid)?;
                 Some(Orphan {
                     pid: *pid,
                     name: display_name(&p.name, &p.cmd),
                     from: from.clone(),
-                    session: session.clone(),
                     start: *start,
                     cpu: p.cpu,
                     mem: p.mem,
@@ -763,15 +787,17 @@ impl EnvOrphans {
                 let agent = procs
                     .get(&agent)
                     .filter(|a| a.start <= p.start && agent_kind(&a.name, &a.cmd) == Some(kind));
-                let project = agent.map_or_else(|| "?".into(), |a| project(a.cwd.as_deref(), home));
                 let session = agent
                     .and_then(|a| agents.iter().find(|r| r.procs[0].pid == a.pid))
                     .and_then(|r| r.session.clone());
                 Some(Orphan {
                     pid: p.pid,
                     name: display_name(&p.name, &p.cmd),
-                    from: base_label(kind, &project),
-                    session,
+                    from: Label {
+                        kind,
+                        project: agent.map(|a| project(a.cwd.as_deref(), home)),
+                        session,
+                    },
                     start: p.start,
                     cpu: p.cpu,
                     mem: p.mem,
@@ -1032,7 +1058,7 @@ mod tests {
         let procs = HashMap::from([proc(11, 1, 101, "vite")]);
         let orphans = tracker.update(&procs, &scan(&procs, home(), no_session));
         assert_eq!(pids(&orphans), [11]);
-        assert_eq!(orphans[0].from, "claude/?");
+        assert_eq!(orphans[0].from.to_string(), "claude/?");
     }
 
     #[test]
@@ -1046,7 +1072,7 @@ mod tests {
 
         let procs = HashMap::from([proc(11, 1, 101, "vite")]);
         let orphans = tracker.update(&procs, &scan(&procs, home(), no_session));
-        assert_eq!(orphans[0].from, "claude/a");
+        assert_eq!(orphans[0].from.to_string(), "claude/a");
     }
 
     #[test]
@@ -1114,13 +1140,13 @@ mod tests {
         ]);
         let orphans = env_orphans(&procs, &[11], 10);
         assert_eq!(pids(&orphans), [11]);
-        assert_eq!(orphans[0].from, "claude/a");
+        assert_eq!(orphans[0].from.to_string(), "claude/a");
     }
 
     #[test]
     fn marked_process_of_closed_session_is_unknown() {
         let procs = HashMap::from([proc(11, 1, 101, "tail")]);
-        assert_eq!(env_orphans(&procs, &[11], 10)[0].from, "claude/?");
+        assert_eq!(env_orphans(&procs, &[11], 10)[0].from.project, None);
     }
 
     #[test]
@@ -1136,7 +1162,7 @@ mod tests {
                 proc(11, 1, 101, "tail"),
             ]),
         ] {
-            assert_eq!(env_orphans(&procs, &[11], 10)[0].from, "claude/?");
+            assert_eq!(env_orphans(&procs, &[11], 10)[0].from.project, None);
         }
     }
 
@@ -1192,25 +1218,24 @@ mod tests {
 
     #[test]
     fn tracked_orphan_wins_merge() {
-        let orphan = |pid: u32, from: &str| Orphan {
+        let orphan = |pid: u32, project: Option<&str>| Orphan {
             pid: Pid::from_u32(pid),
             name: "tail".into(),
-            from: from.into(),
-            session: None,
+            from: Label {
+                kind: "claude",
+                project: project.map(Into::into),
+                session: None,
+            },
             start: 0,
             cpu: 0.0,
             mem: 0,
         };
         let merged = merge(
-            vec![orphan(20, "claude/a")],
-            vec![
-                orphan(30, "claude/?"),
-                orphan(20, "claude/?"),
-                orphan(10, "claude/?"),
-            ],
+            vec![orphan(20, Some("a"))],
+            vec![orphan(30, None), orphan(20, None), orphan(10, None)],
         );
         assert_eq!(pids(&merged), [10, 20, 30]);
-        assert_eq!(merged[1].from, "claude/a");
+        assert_eq!(merged[1].from.project.as_deref(), Some("a"));
     }
 
     /// One claude session at `pid` whose tree uses `cores`.
@@ -1332,10 +1357,7 @@ mod tests {
     fn labels(agents: &[Agent]) -> Vec<String> {
         let mut agents: Vec<&Agent> = agents.iter().collect();
         agents.sort_by_key(|a| a.procs[0].pid);
-        agents
-            .iter()
-            .map(|a| tagged(&base_label(a.kind, &a.project), a.session.as_deref()))
-            .collect()
+        agents.iter().map(|a| a.label().to_string()).collect()
     }
 
     const HUM: &str = "/home/u/code/hum";
@@ -1545,10 +1567,7 @@ mod tests {
         let orphans = env.update(&procs, &agents, home(), |pid| {
             (pid.as_u32() == 11).then(|| environ(&["CLAUDE_PID=10"]))
         });
-        assert_eq!(
-            tagged(&orphans[0].from, orphans[0].session.as_deref()),
-            "claude/hum·gate"
-        );
+        assert_eq!(orphans[0].from.to_string(), "claude/hum·gate");
     }
 
     #[test]
@@ -1562,10 +1581,7 @@ mod tests {
         procs.remove(&Pid::from_u32(20));
         procs.extend([proc(21, 1, 201, "vite")]);
         let orphans = tracker.update(&procs, &scan(&procs, home(), no_session));
-        assert_eq!(
-            tagged(&orphans[0].from, orphans[0].session.as_deref()),
-            "claude/hum·exec"
-        );
+        assert_eq!(orphans[0].from.to_string(), "claude/hum·exec");
     }
 
     #[test]
