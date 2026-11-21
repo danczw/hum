@@ -87,8 +87,8 @@ impl Outline {
 
     /// Forgets the sessions that exited or have no children left, so
     /// children spawned later start collapsed. Returns the root of `at` when
-    /// its tree closed under it, whether by a key or because the tree
-    /// changed.
+    /// its tree is closed: after `collapse_all`, or when the tree lost its
+    /// children or `at` now sits under another root.
     pub fn sync(&mut self, agents: &[Agent], at: Option<Key>) -> Option<Key> {
         let roots: HashSet<Key> = agents
             .iter()
@@ -299,7 +299,6 @@ mod tests {
         let now = agents(&[10, 20]);
         outline.expand_all(&now);
         assert_eq!(outline.fold(&now, pid(21), Fold::Collapse), Some(pid(20)));
-        // the tree stays open
         assert_eq!(rows(&outline, &now), ["10", "11", "20", "21"]);
     }
 

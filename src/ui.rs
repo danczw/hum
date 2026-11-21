@@ -110,7 +110,7 @@ impl View {
     }
 
     /// Forgets exited sessions and moves a cursor on a hidden child to its
-    /// root, whether `c` collapsed the tree or its children exited.
+    /// root, whether `c` collapsed the tree or the tree changed under it.
     fn sync(&mut self, agents: &[Agent]) {
         let at = self.focus.selected(focus::AGENTS);
         if let Some(to) = self.outline.sync(agents, at) {
