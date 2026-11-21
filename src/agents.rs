@@ -158,8 +158,8 @@ pub fn scan(
             }
         })
         .collect();
-    // oldest first, so a new agent lands at the bottom and a working one
-    // keeps its row whatever its cpu
+    // oldest first, so a new agent lands at the bottom and rows hold still
+    // while agents work
     agents.sort_by_key(|a| (a.procs[0].start, a.procs[0].pid));
     let files: Vec<Option<String>> = agents
         .iter()
