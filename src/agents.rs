@@ -158,6 +158,9 @@ pub fn scan(
             }
         })
         .collect();
+    // oldest first, so a new agent lands at the bottom and a working one
+    // keeps its row whatever its cpu
+    agents.sort_by_key(|a| (a.procs[0].start, a.procs[0].pid));
     let files: Vec<Option<String>> = agents
         .iter()
         .map(|a| session_file(&procs[&a.procs[0].pid], a.kind, &mut read_session))
@@ -166,8 +169,6 @@ pub fn scan(
         agent.reported = file.as_deref().and_then(reported_busy);
     }
     name_sessions(procs, &mut agents, &files);
-    // oldest first, so a row moves only when an agent above it exits
-    agents.sort_by_key(|a| (a.procs[0].start, a.procs[0].pid));
     agents
 }
 
@@ -190,7 +191,7 @@ pub fn tagged(base: &str, session: Option<&str>) -> String {
 /// file, `--name` in argv, the file's derived name without its leading
 /// `<project>-`, then the 1-based rank by start time in the group. Names
 /// taken twice in a group, or equal to a rank, fall back to the rank too.
-/// `files` holds each agent's [`session_file`], by index.
+/// `agents` come in start order, `files` holds each one's [`session_file`].
 fn name_sessions(procs: &HashMap<Pid, ProcInfo>, agents: &mut [Agent], files: &[Option<String>]) {
     let mut groups: HashMap<(&str, String), Vec<usize>> = HashMap::new();
     for (i, a) in agents.iter().enumerate() {
@@ -199,8 +200,7 @@ fn name_sessions(procs: &HashMap<Pid, ProcInfo>, agents: &mut [Agent], files: &[
             .or_default()
             .push(i);
     }
-    for mut group in groups.into_values().filter(|g| g.len() > 1) {
-        group.sort_by_key(|&i| (agents[i].procs[0].start, agents[i].procs[0].pid));
+    for group in groups.into_values().filter(|g| g.len() > 1) {
         let names: Vec<Option<String>> = group
             .iter()
             .map(|&i| {
