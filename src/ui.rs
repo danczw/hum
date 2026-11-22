@@ -395,14 +395,10 @@ fn agents_section(entries: &[Entry], width: u16, theme: &Theme) -> Section {
                     false => ('○', theme.dim),
                 };
                 let kind = cut(agent.kind, process_max.saturating_sub(4 + count.len()));
-                let name = cut(&format!("{marker} {status} {kind}{count}"), process_max);
-                let mut chars = name.chars();
-                let fold: String = chars.by_ref().take(2).collect();
-                let status: String = chars.by_ref().take(1).collect();
                 let name = Line::from(vec![
-                    Span::raw(fold),
-                    Span::styled(status, status_style),
-                    Span::raw(chars.collect::<String>()),
+                    Span::raw(format!("{marker} ")),
+                    Span::styled(status.to_string(), status_style),
+                    Span::raw(format!(" {kind}{count}")),
                 ]);
                 Row::new(columns(
                     [
