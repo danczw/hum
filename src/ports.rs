@@ -56,7 +56,10 @@ pub fn listening(procs: &HashMap<Pid, ProcInfo>) -> Vec<Listener> {
     }
 
     let wanted: HashSet<u64> = sockets.iter().map(|&(_, inode, _)| inode).collect();
-    let holders = socket_holders(&wanted, procs.keys());
+    // sorted, so the lowest pid wins among holders [`master`] cannot tell apart
+    let mut pids: Vec<Pid> = procs.keys().copied().collect();
+    pids.sort_unstable();
+    let holders = socket_holders(&wanted, &pids);
     let mut listeners: Vec<Listener> = sockets
         .into_iter()
         .map(|(port, inode, public)| Listener {
@@ -80,8 +83,7 @@ pub fn listening(procs: &HashMap<Pid, ProcInfo>) -> Vec<Listener> {
 
 /// Prefork servers (nginx, gunicorn) share one listen socket between a
 /// master and its workers; picks the master, the first holder whose parent
-/// holds none of it. Skips holders started after `procs` was read: a
-/// worker forked since then would pass for the master.
+/// holds none of it.
 fn master(pids: &[Pid], procs: &HashMap<Pid, ProcInfo>) -> Option<Pid> {
     pids.iter().copied().find(|pid| {
         procs
@@ -169,13 +171,11 @@ fn parse_addr(hex: &str) -> Option<IpAddr> {
     }
 }
 
-/// Maps the wanted socket inodes to every pid in `pids` holding them.
-/// Sockets held by other users' processes stay unresolved, since their fd
-/// tables are not readable.
-fn socket_holders<'a>(
-    wanted: &HashSet<u64>,
-    pids: impl Iterator<Item = &'a Pid>,
-) -> HashMap<u64, Vec<Pid>> {
+/// Maps the wanted socket inodes to every pid in `pids` holding them, in
+/// `pids` order. Only `pids` are scanned, so a worker forked since they were
+/// read never passes for the master. Sockets held by other users' processes
+/// stay unresolved, since their fd tables are not readable.
+fn socket_holders(wanted: &HashSet<u64>, pids: &[Pid]) -> HashMap<u64, Vec<Pid>> {
     let mut holders: HashMap<u64, Vec<Pid>> = HashMap::new();
     if wanted.is_empty() {
         return holders;
@@ -283,8 +283,6 @@ mod tests {
         );
         // a worker alone, its master gone from the holders
         assert_eq!(master(&pids(&[12]), &procs), Some(Pid::from_u32(12)));
-        // 13 forked after procs was read
-        assert_eq!(master(&pids(&[13, 10]), &procs), Some(Pid::from_u32(10)));
     }
 
     #[test]
