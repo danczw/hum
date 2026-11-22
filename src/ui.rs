@@ -413,7 +413,7 @@ fn agents_section(entries: &[Entry], width: u16, theme: &Theme) -> Section {
             }
             outline::Line::Subagent(s) => {
                 let mut cells = [""; 5].map(Cell::from);
-                cells[0] = Cell::from(cut(&format!("    ◇ {}", s.kind), process_max));
+                cells[0] = Cell::from(cut(&format!("    └ ◇ {}", s.kind), process_max));
                 Row::new(columns(cells, cores))
             }
             outline::Line::Proc(p) => Row::new(columns(
@@ -1763,8 +1763,11 @@ mod tests {
         let agents = with_subagents();
         view.outline.expand_all(&agents);
         let lines = text(&draw_agents((74, 16), agents, eight_cores(), &mut view));
-        assert!(lines[5].starts_with("│     ◇ Explore  "), "{lines:#?}");
-        assert!(lines[6].starts_with("│     ◇ code-review  "), "{lines:#?}");
+        assert!(lines[5].starts_with("│     └ ◇ Explore  "), "{lines:#?}");
+        assert!(
+            lines[6].starts_with("│     └ ◇ code-review  "),
+            "{lines:#?}"
+        );
         assert!(lines[7].starts_with("│     └ bash "), "{lines:#?}");
         // no pid, cores or mem of its own
         assert!(
@@ -1779,7 +1782,7 @@ mod tests {
         let mut view = view();
         view.outline.expand_all(&agents);
         let lines = text(&draw_agents((74, 10), agents, eight_cores(), &mut view));
-        assert!(lines.iter().any(|l| l.contains("◇ Explore")), "{lines:#?}");
+        assert!(lines.iter().any(|l| l.contains("    └ ◇ Explore")), "{lines:#?}");
     }
 
     #[test]
@@ -1790,7 +1793,7 @@ mod tests {
         view.outline.expand_all(&agents);
         let lines = text(&draw_agents((74, 16), agents, eight_cores(), &mut view));
         assert!(lines[4].starts_with("│ ▾ ● claude "), "{lines:#?}");
-        assert!(lines[5].starts_with("│     ◇ Explore "), "{lines:#?}");
+        assert!(lines[5].starts_with("│     └ ◇ Explore "), "{lines:#?}");
     }
 
     fn view() -> View {
