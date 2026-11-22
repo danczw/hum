@@ -90,6 +90,19 @@ pub struct Proc {
     pub start: u64,
 }
 
+impl Proc {
+    fn new(p: &ProcInfo, depth: usize) -> Self {
+        Self {
+            pid: p.pid,
+            name: display_name(&p.name, &p.cmd),
+            cpu: p.cpu,
+            mem: p.mem,
+            depth,
+            start: p.start,
+        }
+    }
+}
+
 pub struct Agent {
     pub kind: &'static str,
     /// Named after the agent process's cwd, see [`project`].
@@ -308,14 +321,7 @@ fn walk(
     out: &mut Vec<Proc>,
 ) {
     let Some(p) = procs.get(&pid) else { return };
-    out.push(Proc {
-        pid,
-        name: display_name(&p.name, &p.cmd),
-        cpu: p.cpu,
-        mem: p.mem,
-        depth,
-        start: p.start,
-    });
+    out.push(Proc::new(p, depth));
     if let Some(kids) = children.get(&pid) {
         // a cycle below the root runs through the root, see [`ancestors`]
         let root = out[0].pid;
