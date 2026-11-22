@@ -538,8 +538,9 @@ fn columns<T>(columns: [T; 5], cores: bool) -> Vec<T> {
     columns
 }
 
-/// `name` under an agent at `depth`, past the agent's status dot, so an
-/// agent without a fold marker never reads as a child. Subagents and
+/// `name` at `depth` below its agent, 1 for a direct child, past the
+/// agent's status dot, so an agent without a fold marker never reads as a
+/// child. Subagents and
 /// processes share it, so neither reads as a child of the other.
 fn branch(depth: usize, name: &str) -> String {
     format!("{}└ {name}", "  ".repeat(depth + 1))
