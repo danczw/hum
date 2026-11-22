@@ -18,7 +18,8 @@ use crate::theme::Theme;
 // pane truncates names, never numbers. Fill ranks below Length in ratatui's
 // layout, Min ranks above it.
 /// pid_max is at most 4194304 on 64-bit Linux: 7 digits.
-const PID: Constraint = Constraint::Length(7);
+const PID_WIDTH: u16 = 7;
+const PID: Constraint = Constraint::Length(PID_WIDTH);
 /// `fmt_cores` up to 99.99 cores.
 const CORES_WIDTH: u16 = 5;
 const CORES: Constraint = Constraint::Length(CORES_WIDTH);
@@ -27,27 +28,30 @@ const CORES: Constraint = Constraint::Length(CORES_WIDTH);
 const CORES_COL: usize = 3;
 const CORES_SPAN: u16 = CORES_WIDTH + 1;
 /// `fmt_bytes` up to `1023.9M`.
-const MEM: Constraint = Constraint::Length(7);
+const MEM_WIDTH: u16 = 7;
+const MEM: Constraint = Constraint::Length(MEM_WIDTH);
+/// `:65535*`
+const PORT_WIDTH: u16 = 7;
 /// Agent process names, tree indent included, get at least this many chars.
 const PROCESS: u16 = 12;
 /// Project names get at least this many chars.
 const PROJECT: u16 = 9;
 /// The agents box without its name columns: pid, cores, mem, four gaps, two
 /// borders and a blank column inside each.
-const AGENTS_FIXED: u16 = 7 + 5 + 7 + 4 + 2 + 2;
+const AGENTS_FIXED: u16 = PID_WIDTH + CORES_WIDTH + MEM_WIDTH + 4 + 2 + 2;
 /// The agents box with both names at their minimum.
 const AGENTS_MIN: u16 = PROCESS + PROJECT + AGENTS_FIXED;
 /// Orphan process names are cut to the width of their `process` header.
 const ORPHAN_NAME: usize = 7;
 /// The orphans box without `from`: pid, name, cores, mem, four gaps, two
 /// borders and a blank column inside each.
-const ORPHANS_FIXED: u16 = 7 + ORPHAN_NAME as u16 + 5 + 7 + 4 + 2 + 2;
+const ORPHANS_FIXED: u16 = PID_WIDTH + ORPHAN_NAME as u16 + CORES_WIDTH + MEM_WIDTH + 4 + 2 + 2;
 /// Fits a whole orphan row such as `9120 node claude/hum 0.00 48.0M` and
 /// the `process` header. Narrower orphan sections drop cores.
 const SIDE_MIN: u16 = 44;
 /// The ports box without process and agent: port, pid, three gaps, two
 /// borders and a blank column inside each.
-const PORTS_FIXED: u16 = 7 + 7 + 3 + 2 + 2;
+const PORTS_FIXED: u16 = PORT_WIDTH + PID_WIDTH + 3 + 2 + 2;
 /// Narrower panes stack the sections; wider ones put orphans and ports in a
 /// right-hand column.
 const WIDE: u16 = AGENTS_MIN + SIDE_MIN;
@@ -575,8 +579,7 @@ fn ports_section(ports: &[Listener], all: bool, width: u16, theme: &Theme) -> Se
             .map(|p| (u64::from(p.port), p.pid().map_or(0, |p| p.as_u32().into())))
             .collect(),
         widths: vec![
-            // `:65535*`
-            Constraint::Length(7),
+            Constraint::Length(PORT_WIDTH),
             PID,
             Constraint::Fill(1),
             Constraint::Fill(2),
