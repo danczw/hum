@@ -153,7 +153,6 @@ impl Agent {
         !self.subagents.is_empty() || self.reported.unwrap_or(self.cpu_busy)
     }
 
-    /// True when `of` names one of the agent's processes.
     pub fn holds(&self, of: Key) -> bool {
         self.procs.iter().any(|p| p.key() == of)
     }
