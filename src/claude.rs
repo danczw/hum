@@ -229,16 +229,13 @@ fn top_level(json: &str, key: &str) -> Option<Field> {
         skip_ws(&mut chars);
         chars.next_if_eq(&':')?;
         skip_ws(&mut chars);
-        if chars.peek() == Some(&'"') {
-            let value = json_string(&mut chars)?;
-            if k == key {
-                return Some(Field::Str(value));
-            }
+        let value = if chars.peek() == Some(&'"') {
+            Field::Str(json_string(&mut chars)?)
         } else {
-            let value = skip_json_value(&mut chars)?;
-            if k == key {
-                return Some(Field::Raw(value));
-            }
+            Field::Raw(skip_json_value(&mut chars)?)
+        };
+        if k == key {
+            return Some(value);
         }
         skip_ws(&mut chars);
         chars.next_if_eq(&',')?;
