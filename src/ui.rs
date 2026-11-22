@@ -160,7 +160,6 @@ struct Section {
     count: usize,
     /// Rows before a filter, the 7 in `ports: 2/7`; `None` when it hid none.
     total: Option<usize>,
-    /// Draws the count in the title.
     count_style: Style,
     header: Row<'static>,
     rows: Vec<Row<'static>>,
@@ -967,7 +966,6 @@ fn fmt_bytes(bytes: u64) -> String {
     }
 }
 
-/// Process cpu as cores used.
 fn fmt_cores(pct: f32) -> String {
     format!("{:.2}", agents::cores(pct))
 }
