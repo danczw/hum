@@ -4,7 +4,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use sysinfo::Pid;
 
-use crate::agents::{ProcInfo, display_name};
+use crate::agents::{ProcInfo, display_name, live};
 
 /// Socket state code for LISTEN in /proc/net/tcp.
 const TCP_LISTEN: u8 = 0x0A;
@@ -90,7 +90,7 @@ pub fn join(ports: &mut Vec<Listener>, procs: &HashMap<Pid, ProcInfo>) {
         let Some(holder) = &mut l.holder else {
             return true;
         };
-        let Some(p) = procs.get(&holder.pid).filter(|p| p.start == holder.start) else {
+        let Some(p) = live(procs, holder.pid, holder.start) else {
             return false;
         };
         holder.name = display_name(&p.name, &p.cmd);
