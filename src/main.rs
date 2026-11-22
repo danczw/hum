@@ -22,7 +22,7 @@ use focus::Focus;
 use outline::{Fold, Outline};
 use ports::Listener;
 use theme::Theme;
-use ui::{Gauges, Port, Snapshot, View};
+use ui::{Gauges, Snapshot, View};
 
 /// Ports change rarely and resolving owners reads every fd in /proc.
 const PORT_TICKS: u32 = 5;
@@ -33,7 +33,6 @@ struct App {
     sys: System,
     ticks: u32,
     sessions: Sessions,
-    ports: Vec<Listener>,
     tick: Duration,
 }
 
@@ -45,12 +44,12 @@ impl App {
             sys: System::new().map_err(io::Error::other)?,
             ticks: 0,
             sessions: Sessions::new(home, claude, agents, tick),
-            ports: Vec::new(),
             tick,
         })
     }
 
-    fn refresh(&mut self) -> Snapshot {
+    /// `ports` are the last snapshot's, rejoined or reread.
+    fn refresh(&mut self, mut ports: Vec<Listener>) -> Snapshot {
         self.sys.refresh_cpu_usage();
         self.sys.refresh_memory();
         self.sys.refresh_processes_specifics(
@@ -71,24 +70,17 @@ impl App {
         let procs = agents::snapshot(&self.sys);
         let (agents, orphans) = self.sessions.observe(&procs, SystemTime::now());
         if self.ticks.is_multiple_of(PORT_TICKS) {
-            self.ports = ports::listening(&procs);
+            ports = ports::listening(&procs);
         } else {
-            ports::join(&mut self.ports, &procs);
+            ports::join(&mut ports, &procs);
         }
         self.ticks = self.ticks.wrapping_add(1);
-        let ports = self
-            .ports
-            .iter()
-            .map(|l| Port {
-                port: l.port,
-                public: l.public,
-                holder: l.holder.clone(),
-                owner: l
-                    .holder
-                    .as_ref()
-                    .and_then(|h| agents::owner(&agents, &orphans, h.pid, h.start)),
-            })
-            .collect();
+        for l in &mut ports {
+            l.owner = l
+                .holder
+                .as_ref()
+                .and_then(|h| agents::owner(&agents, &orphans, h.pid, h.start));
+        }
         Snapshot {
             gauges: Gauges::read(&self.sys),
             agents,
@@ -152,14 +144,14 @@ fn main() -> io::Result<ExitCode> {
 fn run(mut terminal: DefaultTerminal, app: &mut App, view: &mut View) -> io::Result<()> {
     // stamped before the refresh so its run time does not stretch the period
     let mut last_tick = Instant::now();
-    let mut snapshot = app.refresh();
+    let mut snapshot = app.refresh(Vec::new());
     // the second refresh comes early so cpu shows before a long tick ends
     let mut period = app.tick.min(CPU_SETTLE);
 
     loop {
         if last_tick.elapsed() >= period {
             last_tick = Instant::now();
-            snapshot = app.refresh();
+            snapshot = app.refresh(std::mem::take(&mut snapshot.ports));
             period = app.tick;
             // a refresh slower than the tick restarts it, so hum still idles a full tick
             if last_tick.elapsed() >= period {
