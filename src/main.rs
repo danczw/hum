@@ -18,8 +18,7 @@ use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 use agents::Sessions;
 use cli::Action;
-use focus::Focus;
-use outline::{Fold, Outline};
+use outline::Fold;
 use ports::Listener;
 use theme::Theme;
 use ui::{Gauges, Snapshot, View};
@@ -126,15 +125,7 @@ fn main() -> io::Result<ExitCode> {
     // leaked once; agent kinds are &'static str
     let agents = opts.agents.into_iter().map(|a| &*a.leak()).collect();
     let mut app = App::new(opts.interval, agents)?;
-    let mut view = View {
-        help: false,
-        help_scroll: 0,
-        cores: false,
-        all_ports: false,
-        theme: Theme::from_env(),
-        focus: Focus::default(),
-        outline: Outline::default(),
-    };
+    let mut view = View::new(Theme::from_env());
     let terminal = ratatui::init();
     let result = run(terminal, &mut app, &mut view);
     ratatui::restore();
@@ -166,22 +157,23 @@ fn run(mut terminal: DefaultTerminal, app: &mut App, view: &mut View) -> io::Res
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
+            // the cursor stays put behind the help
+            if let Some(scroll) = &mut view.help {
+                match key.code {
+                    KeyCode::Char('q') => return Ok(()),
+                    KeyCode::Esc | KeyCode::Char('?') => view.help = None,
+                    KeyCode::Char('j') | KeyCode::Down => *scroll += 1,
+                    KeyCode::Char('k') | KeyCode::Up => *scroll = scroll.saturating_sub(1),
+                    _ => {}
+                }
+                continue;
+            }
             let focus = &mut view.focus;
             let agents = &snapshot.agents;
             match key.code {
-                KeyCode::Esc if view.help => view.help = false,
                 KeyCode::Esc if focus.clear() => {}
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                KeyCode::Char('?') => {
-                    view.help = !view.help;
-                    view.help_scroll = 0;
-                }
-                KeyCode::Char('j') | KeyCode::Down if view.help => view.help_scroll += 1,
-                KeyCode::Char('k') | KeyCode::Up if view.help => {
-                    view.help_scroll = view.help_scroll.saturating_sub(1)
-                }
-                // the cursor stays put behind the help
-                _ if view.help => {}
+                KeyCode::Char('?') => view.help = Some(0),
                 KeyCode::Char('j') | KeyCode::Down => focus.step(1),
                 KeyCode::Char('k') | KeyCode::Up => focus.step(-1),
                 KeyCode::Char('g') => focus.first(),

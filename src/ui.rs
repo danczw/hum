@@ -86,9 +86,8 @@ const DIVIDER: border::Set = border::Set {
 
 /// What the user toggles while hum runs.
 pub struct View {
-    pub help: bool,
-    /// Rows the help is scrolled down, clamped when drawn.
-    pub help_scroll: usize,
+    /// Rows the open help is scrolled down, clamped when drawn.
+    pub help: Option<usize>,
     /// Per-core bars under the gauge line.
     pub cores: bool,
     /// Every listening port, not only those of agents and orphans.
@@ -99,6 +98,17 @@ pub struct View {
 }
 
 impl View {
+    pub fn new(theme: Theme) -> Self {
+        Self {
+            help: None,
+            cores: false,
+            all_ports: false,
+            theme,
+            focus: Focus::default(),
+            outline: Outline::default(),
+        }
+    }
+
     /// Expands or collapses the tree under the agents cursor.
     pub fn fold(&mut self, agents: &[Agent], fold: Fold) {
         if !self.focus.shows(focus::AGENTS) {
@@ -219,8 +229,8 @@ pub fn draw(frame: &mut Frame, snapshot: &Snapshot, view: &mut View) {
         stack(frame, [agents, orphans, ports], body, compact, theme, focus);
     }
 
-    if view.help {
-        draw_help(frame, &mut view.help_scroll);
+    if let Some(scroll) = &mut view.help {
+        draw_help(frame, scroll);
     }
     focus.settle();
 }
@@ -958,7 +968,6 @@ mod tests {
 
     use crate::agents::{self, BusyTracker, ProcInfo};
     use crate::claude::Subagent;
-    use crate::focus::Focus;
     use crate::label::Label;
     use crate::ports::Holder;
 
@@ -1781,15 +1790,7 @@ mod tests {
     }
 
     fn view() -> View {
-        View {
-            help: false,
-            help_scroll: 0,
-            cores: false,
-            all_ports: false,
-            theme: Theme::ayu_mirage(),
-            focus: Focus::default(),
-            outline: Outline::default(),
-        }
+        View::new(Theme::ayu_mirage())
     }
 
     fn shows(buf: &Buffer, pid: &str) -> bool {
@@ -1799,7 +1800,7 @@ mod tests {
     #[test]
     fn help_fits_a_short_pane_in_two_columns() {
         let mut view = View {
-            help: true,
+            help: Some(0),
             ..view()
         };
         // too short for one column: two, with every line shown
@@ -1831,7 +1832,7 @@ mod tests {
     #[test]
     fn help_takes_more_columns_in_a_wide_short_pane() {
         let mut view = View {
-            help: true,
+            help: Some(0),
             ..view()
         };
         // 4 rows need 4 columns, 134 wide; 5 rows fit in 3
@@ -1850,7 +1851,7 @@ mod tests {
     #[test]
     fn help_scrolls_when_too_short_and_narrow() {
         let mut view = View {
-            help: true,
+            help: Some(0),
             ..view()
         };
         let last = HELP[HELP.len() - 1];
@@ -1861,9 +1862,9 @@ mod tests {
             lines[7].contains("╰ ↓ ") && !lines[0].contains('↑'),
             "{lines:#?}"
         );
-        view.help_scroll = 99;
+        view.help = Some(99);
         let lines = text(&draw_view((74, 8), mockup(), &mut view));
-        assert_eq!(view.help_scroll, 1);
+        assert_eq!(view.help, Some(1));
         assert!(lines.iter().any(|l| l.contains(last)), "{lines:#?}");
         assert!(
             lines[0].contains(" help ↑ ") && !lines[7].contains('↓'),
@@ -1871,7 +1872,7 @@ mod tests {
         );
         // a pane with room shows it all, back at the top
         let lines = text(&draw_view((74, 16), mockup(), &mut view));
-        assert_eq!(view.help_scroll, 0);
+        assert_eq!(view.help, Some(0));
         assert!(lines.iter().any(|l| l.contains(HELP[0])), "{lines:#?}");
     }
 
