@@ -48,7 +48,7 @@ const ORPHAN_NAME: usize = 7;
 const ORPHANS_FIXED: u16 = PID_WIDTH + ORPHAN_NAME as u16 + CORES_WIDTH + MEM_WIDTH + 4 + 2 + 2;
 /// Fits a whole orphan row such as `9120 node claude/hum 0.00 48.0M` and
 /// the `process` header. Narrower orphan sections drop cores.
-const SIDE_MIN: u16 = 44;
+const SIDE_MIN: u16 = ORPHANS_FIXED + "claude/hum".len() as u16;
 /// The ports box without process and agent: port, pid, three gaps, two
 /// borders and a blank column inside each.
 const PORTS_FIXED: u16 = PORT_WIDTH + PID_WIDTH + 3 + 2 + 2;
@@ -160,8 +160,8 @@ struct Section {
     count: usize,
     /// Rows before a filter, the 7 in `ports: 2/7`; `None` when it hid none.
     total: Option<usize>,
-    /// Draws the count in the title; `None` keeps it dim like the rest.
-    count_style: Option<Style>,
+    /// Draws the count in the title.
+    count_style: Style,
     header: Row<'static>,
     rows: Vec<Row<'static>>,
     /// One per row.
@@ -185,9 +185,10 @@ pub fn draw(frame: &mut Frame, snapshot: &Snapshot, view: &mut View) {
     let grid = view
         .cores
         .then(|| CoreGrid::new(snapshot.gauges.cores.len(), area.width));
+    let wide = area.width >= WIDE;
     // the rows compact sections need for their titles: three stacked, two
     // side by side
-    let titles = if area.width >= WIDE { 2 } else { 3 };
+    let titles = if wide { 2 } else { 3 };
     let grid_rows = grid.map_or(0, |g| {
         g.rows.min(area.height / 2).min(area.height - 1 - titles)
     });
@@ -207,7 +208,7 @@ pub fn draw(frame: &mut Frame, snapshot: &Snapshot, view: &mut View) {
 
     let ports = |width| ports_section(&snapshot.ports, view.all_ports, width, theme);
     let rows = view.outline.rows(&snapshot.agents);
-    if body.width >= WIDE {
+    if wide {
         let side = (body.width * 2 / 5).max(SIDE_MIN);
         let [left, right] =
             Layout::horizontal([Constraint::Fill(1), Constraint::Length(side)]).areas(body);
@@ -302,8 +303,7 @@ impl CoreGrid {
                 index,
             };
         }
-        // index, ` ⎣`, ` 77%⎦`
-        let fixed = index + 2 + 6;
+        let fixed = Self::fixed(index);
         let fit = (width + CORE_GAP) / (fixed + CORE_BAR + CORE_GAP);
         let rows = cores.div_ceil(fit.clamp(1, cores));
         let cols = cores.div_ceil(rows);
@@ -316,9 +316,14 @@ impl CoreGrid {
         }
     }
 
+    /// A cell without its bar: index, ` ⎣`, ` 77%⎦`.
+    fn fixed(index: u16) -> u16 {
+        index + 2 + 6
+    }
+
     /// One core's cell: index, space, bar and percent in brackets.
     fn cell(&self) -> u16 {
-        self.index + self.bar + 8
+        Self::fixed(self.index) + self.bar
     }
 }
 
@@ -441,7 +446,7 @@ fn agents_section(entries: &[Entry], width: u16, theme: &Theme) -> Section {
             .filter(|e| matches!(e.line, outline::Line::Root { .. }))
             .count(),
         total: None,
-        count_style: None,
+        count_style: theme.dim,
         header: Row::new(columns(
             [
                 Cell::from("process"),
@@ -495,7 +500,11 @@ fn orphans_section(orphans: &[Orphan], width: u16, theme: &Theme) -> Section {
         pane: focus::ORPHANS,
         count: orphans.len(),
         total: None,
-        count_style: (!orphans.is_empty()).then_some(theme.warn),
+        count_style: if orphans.is_empty() {
+            theme.dim
+        } else {
+            theme.warn
+        },
         header: Row::new(columns(
             [
                 num("pid".into()),
@@ -576,7 +585,7 @@ fn ports_section(ports: &[Listener], all: bool, width: u16, theme: &Theme) -> Se
         pane: focus::PORTS,
         count: shown.len(),
         total: (shown.len() < ports.len()).then_some(ports.len()),
-        count_style: None,
+        count_style: theme.dim,
         header: Row::new([
             Cell::from("port"),
             num("pid".into()),
@@ -757,11 +766,13 @@ fn draw_footer(frame: &mut Frame, section: Section, area: Rect, theme: &Theme, f
     focus.pane(section.pane).hide();
     let mut spans = title(&section, false, theme);
     // corners, the closing space and at least one rule
-    let mut room = usize::from(area.width).saturating_sub(Line::from(spans.clone()).width() + 4);
+    let width = spans.iter().map(Span::width).sum::<usize>();
+    let mut room = usize::from(area.width).saturating_sub(width + 4);
     let entries = &section.inline;
+    let sep = |i| if i == 0 { " · " } else { "  " };
     let mut shown = 0;
     for (i, entry) in entries.iter().enumerate() {
-        let sep = if i == 0 { " · " } else { "  " };
+        let sep = sep(i);
         let len = sep.chars().count() + entry.width();
         // keep room for `  +N` after this entry
         let rest = entries.len() - i - 1;
@@ -785,8 +796,7 @@ fn draw_footer(frame: &mut Frame, section: Section, area: Rect, theme: &Theme, f
         shown += 1;
     }
     if shown < entries.len() {
-        let sep = if shown == 0 { " · " } else { "  " };
-        spans.push(Span::styled(sep, theme.dim));
+        spans.push(Span::styled(sep(shown), theme.dim));
         spans.push(Span::styled(
             format!("+{}", entries.len() - shown),
             theme.dim,
@@ -812,7 +822,7 @@ fn title(section: &Section, shows: bool, theme: &Theme) -> Vec<Span<'static>> {
                 Some(total) => format!("{}/{total}", section.count),
                 None => section.count.to_string(),
             },
-            section.count_style.unwrap_or(theme.dim),
+            section.count_style,
         ),
     ]
 }
@@ -1012,10 +1022,7 @@ mod tests {
     }
 
     fn draw_lines((width, height): (u16, u16), procs: Vec<(Pid, ProcInfo)>) -> Vec<String> {
-        let buf = draw((width, height), procs, Theme::ayu_mirage());
-        (0..height)
-            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect())
-            .collect()
+        text(&draw((width, height), procs, Theme::ayu_mirage()))
     }
 
     /// Draws with every tree expanded.
@@ -1175,19 +1182,14 @@ mod tests {
     }
 
     /// The color of the first cell where `text` first shows, `skip` chars in.
-    fn fg_at(buf: &Buffer, text: &str, skip: usize) -> Color {
-        let rows = (0..buf.area.height).map(|y| {
-            (0..buf.area.width)
-                .map(|x| buf[(x, y)].symbol())
-                .collect::<String>()
-        });
-        for (y, row) in rows.enumerate() {
-            if let Some(i) = row.find(text) {
+    fn fg_at(buf: &Buffer, needle: &str, skip: usize) -> Color {
+        for (y, row) in text(buf).into_iter().enumerate() {
+            if let Some(i) = row.find(needle) {
                 let x = row[..i].chars().count() + skip;
                 return buf[(x as u16, y as u16)].fg;
             }
         }
-        panic!("{text:?} not drawn");
+        panic!("{needle:?} not drawn");
     }
 
     fn fg(style: Style) -> Color {
