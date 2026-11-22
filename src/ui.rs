@@ -642,6 +642,7 @@ fn stack<const N: usize>(
     focus: &mut Focus,
 ) {
     let footer = sections[N - 1].inline.is_some();
+    debug_assert!(compact || !footer, "only a compact box folds a footer");
     let header = u16::from(!compact);
     let mut left = area.height;
     let mut heights = [0; N];
@@ -685,11 +686,13 @@ fn stack<const N: usize>(
         }
     }
     let areas: [Rect; N] = Layout::vertical(heights.map(Constraint::Length)).areas(area);
-    for (i, (section, area)) in sections.into_iter().zip(areas).enumerate() {
+    for (i, (mut section, area)) in sections.into_iter().zip(areas).enumerate() {
         let block = if !compact {
             Block::bordered().border_type(BorderType::Rounded)
-        } else if footer && i == N - 1 {
-            draw_footer(frame, section, area, theme, focus);
+        } else if i == N - 1
+            && let Some(entries) = section.inline.take()
+        {
+            draw_footer(frame, section, &entries, area, theme, focus);
             continue;
         } else {
             let bottom = if i == N - 1 {
@@ -761,13 +764,19 @@ fn draw_section(
 /// A section folded into the bottom border of a compact box:
 /// `╰ ports: 2 · :3000 node claude/hum  :5432 postgres ──╯`. Entries that do
 /// not fit are counted as `+N`. `Tab` passes over the section.
-fn draw_footer(frame: &mut Frame, section: Section, area: Rect, theme: &Theme, focus: &mut Focus) {
+fn draw_footer(
+    frame: &mut Frame,
+    section: Section,
+    entries: &[Line],
+    area: Rect,
+    theme: &Theme,
+    focus: &mut Focus,
+) {
     focus.pane(section.pane).hide();
     let mut spans = title(&section, false, theme);
     // corners, the closing space and at least one rule
     let width = spans.iter().map(Span::width).sum::<usize>();
     let mut room = usize::from(area.width).saturating_sub(width + 4);
-    let entries = section.inline.as_deref().unwrap_or_default();
     let sep = |i| if i == 0 { " · " } else { "  " };
     let mut shown = 0;
     for (i, entry) in entries.iter().enumerate() {
