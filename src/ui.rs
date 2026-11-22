@@ -7,7 +7,7 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Padding, Paragraph, Row, Table, TableState,
 };
 
-use crate::agents::{Agent, Orphan, Owner};
+use crate::agents::{self, Agent, Orphan, Owner};
 use crate::focus::{self, Focus, Key};
 use crate::label::cut;
 use crate::outline::{self, Entry, Fold, Outline};
@@ -949,9 +949,9 @@ fn fmt_bytes(bytes: u64) -> String {
     }
 }
 
-/// sysinfo reports process CPU as percent of one core; show it as cores used.
+/// Process cpu as cores used.
 fn fmt_cores(pct: f32) -> String {
-    format!("{:.2}", pct / 100.0)
+    format!("{:.2}", agents::cores(pct))
 }
 
 #[cfg(test)]
