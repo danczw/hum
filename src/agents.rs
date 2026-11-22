@@ -636,6 +636,11 @@ fn merge(mut tracked: Vec<Orphan>, env: Vec<Orphan>) -> Vec<Orphan> {
     tracked
 }
 
+/// sysinfo reports process cpu as percent of one core; this is cores used.
+pub fn cores(pct: f32) -> f32 {
+    pct / 100.0
+}
+
 /// Remembers each session's recent tree cpu to tell busy from idle.
 pub struct BusyTracker {
     /// (root pid, start time) -> tree cpu per tick, newest last; start time
@@ -678,8 +683,7 @@ impl BusyTracker {
             // sampled with a reported status too, so the fallback has a full
             // window if the status goes away
             window.push_back(agent.cpu());
-            // cpu is in percent of one core
-            let mean = window.iter().sum::<f32>() / window.len() as f32 / 100.0;
+            let mean = cores(window.iter().sum::<f32>() / window.len() as f32);
             agent.cpu_busy = window.len() == self.window && mean > BUSY_CORES;
         }
     }
