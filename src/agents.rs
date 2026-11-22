@@ -65,6 +65,12 @@ pub struct ProcInfo {
     pub cwd: Option<PathBuf>,
 }
 
+/// The process `pid` if it is still the one started at `start`, not a
+/// reuse of its pid.
+pub fn live(procs: &HashMap<Pid, ProcInfo>, pid: Pid, start: u64) -> Option<&ProcInfo> {
+    procs.get(&pid).filter(|p| p.start == start)
+}
+
 pub fn snapshot(sys: &System) -> HashMap<Pid, ProcInfo> {
     sys.processes()
         .values()
@@ -463,7 +469,7 @@ pub struct OrphanTracker {
 impl OrphanTracker {
     pub fn update(&mut self, procs: &HashMap<Pid, ProcInfo>, agents: &[Agent]) -> Vec<Orphan> {
         self.seen
-            .retain(|pid, (_, start)| procs.get(pid).is_some_and(|p| p.start == *start));
+            .retain(|&pid, (_, start)| live(procs, pid, *start).is_some());
 
         let mut current = HashSet::new();
         for agent in agents {
@@ -528,7 +534,7 @@ impl EnvOrphans {
         mut read: impl FnMut(Pid) -> Option<Vec<u8>>,
     ) -> Vec<Orphan> {
         self.markers
-            .retain(|pid, (start, _)| procs.get(pid).is_some_and(|p| p.start == *start));
+            .retain(|&pid, (start, _)| live(procs, pid, *start).is_some());
 
         let tracked: HashSet<Pid> = agents
             .iter()
