@@ -170,9 +170,12 @@ pub fn scan(
     let mut agents: Vec<Agent> = kinds
         .iter()
         // Agents started by another agent belong to that agent's tree.
+        // A pid-reuse cycle leads back to the agent; it still roots its tree.
         .filter(|&(&pid, _)| {
             let parent = procs.get(&pid).and_then(|p| p.parent);
-            !std::iter::successors(parent, |p| procs.get(p)?.parent).any(|p| kinds.contains_key(&p))
+            !ancestors(procs, parent)
+                .take_while(|&p| p != pid)
+                .any(|p| kinds.contains_key(&p))
         })
         .map(|(&pid, &kind)| {
             let mut tree = Vec::new();
@@ -292,6 +295,12 @@ fn argv_name(cmd: &[OsString]) -> Option<String> {
     None
 }
 
+/// `from` and the parents above it. A pid reused while sysinfo read the
+/// table can close a cycle, so the walk stops after one pass over `procs`.
+fn ancestors(procs: &HashMap<Pid, ProcInfo>, from: Option<Pid>) -> impl Iterator<Item = Pid> {
+    std::iter::successors(from, |p| procs.get(p)?.parent).take(procs.len())
+}
+
 fn walk(
     procs: &HashMap<Pid, ProcInfo>,
     children: &HashMap<Pid, Vec<Pid>>,
@@ -309,7 +318,9 @@ fn walk(
         start: p.start,
     });
     if let Some(kids) = children.get(&pid) {
-        for &kid in kids {
+        // a cycle below the root runs through the root, see [`ancestors`]
+        let root = out[0].pid;
+        for &kid in kids.iter().filter(|&&kid| kid != root) {
             walk(procs, children, kid, depth + 1, out);
         }
     }
@@ -534,7 +545,7 @@ impl EnvOrphans {
                     .1?;
                 // Still under its agent, which scan did not recognise as a
                 // session, e.g. `node cli.js`.
-                if std::iter::successors(p.parent, |p| procs.get(p)?.parent).any(|p| p == agent) {
+                if ancestors(procs, p.parent).any(|p| p == agent) {
                     return None;
                 }
                 // A reused pid is younger than the processes it marks.
@@ -828,6 +839,24 @@ mod tests {
             .map(|p| (p.pid.as_u32(), p.depth))
             .collect();
         assert_eq!(tree, [(10, 0), (11, 1), (12, 2)]);
+    }
+
+    #[test]
+    fn parent_cycle_ends_the_walk() {
+        // 200 exited and its pid went to a child of 100 mid-read; 500 and
+        // 600 did the same without an agent
+        let procs = HashMap::from([
+            proc(100, 200, 100, "claude"),
+            proc(200, 100, 200, "bash"),
+            proc(300, 200, 300, "vite"),
+            proc(500, 600, 500, "bash"),
+            proc(600, 500, 600, "bash"),
+            proc(700, 600, 700, "vite"),
+        ]);
+        let agents = scan(&procs, home(), no_session);
+        let tree: Vec<u32> = agents[0].procs.iter().map(|p| p.pid.as_u32()).collect();
+        assert_eq!(tree, [100, 200, 300]);
+        assert_eq!(pids(&env_orphans(&procs, &[700], 400)), [700]);
     }
 
     #[test]
