@@ -204,6 +204,7 @@ fn socket_holders<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::fixture::proc;
 
     // Rows from a little-endian host.
     const HEADER: &str = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode";
@@ -253,20 +254,6 @@ mod tests {
         assert!(is_public(Ipv4Addr::new(192, 168, 1, 5).into()));
         assert!(!is_public(Ipv4Addr::new(127, 0, 1, 1).into()));
         assert!(!is_public(Ipv4Addr::LOCALHOST.to_ipv6_mapped().into()));
-    }
-
-    fn proc(pid: u32, parent: u32, start: u64, cmd: &str) -> (Pid, ProcInfo) {
-        let info = ProcInfo {
-            pid: Pid::from_u32(pid),
-            parent: Some(Pid::from_u32(parent)),
-            start,
-            name: cmd.into(),
-            cmd: vec![cmd.into()],
-            cpu: 0.0,
-            mem: 0,
-            cwd: None,
-        };
-        (info.pid, info)
     }
 
     fn held(port: u16, pid: u32, start: u64) -> Listener {

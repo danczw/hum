@@ -749,17 +749,13 @@ impl Sessions {
     }
 }
 
+/// Processes for tests in other modules.
 #[cfg(test)]
-mod tests {
+pub mod fixture {
     use super::*;
-    use crate::claude::fixture;
 
-    fn kind(cmd: &str) -> Option<&'static str> {
-        let cmd: Vec<OsString> = cmd.split(' ').map(OsString::from).collect();
-        agent_kind(OsStr::new(""), &cmd, &[])
-    }
-
-    fn proc(pid: u32, parent: u32, start: u64, cmd: &str) -> (Pid, ProcInfo) {
+    /// `cmd` split on spaces; named after its first word.
+    pub fn proc(pid: u32, parent: u32, start: u64, cmd: &str) -> (Pid, ProcInfo) {
         let cmd: Vec<OsString> = cmd.split(' ').map(OsString::from).collect();
         let info = ProcInfo {
             pid: Pid::from_u32(pid),
@@ -772,6 +768,18 @@ mod tests {
             cwd: None,
         };
         (info.pid, info)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fixture::proc;
+    use super::*;
+    use crate::claude::fixture;
+
+    fn kind(cmd: &str) -> Option<&'static str> {
+        let cmd: Vec<OsString> = cmd.split(' ').map(OsString::from).collect();
+        agent_kind(OsStr::new(""), &cmd, &[])
     }
 
     fn in_dir((pid, mut info): (Pid, ProcInfo), cwd: &str) -> (Pid, ProcInfo) {
