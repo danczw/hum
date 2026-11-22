@@ -422,6 +422,19 @@ pub struct Orphan {
     pub mem: u64,
 }
 
+impl Orphan {
+    fn new(p: &ProcInfo, from: Label) -> Self {
+        Self {
+            pid: p.pid,
+            name: display_name(&p.name, &p.cmd),
+            from,
+            start: p.start,
+            cpu: p.cpu,
+            mem: p.mem,
+        }
+    }
+}
+
 /// The session a port's process belongs to: `claude/hum`, or
 /// `orphan:claude/hum` when the process outlived it.
 #[derive(Debug, PartialEq)]
@@ -488,17 +501,8 @@ impl OrphanTracker {
             .seen
             .iter()
             .filter(|(pid, _)| !current.contains(pid))
-            .filter_map(|(pid, (from, start))| {
-                let p = procs.get(pid)?;
-                Some(Orphan {
-                    pid: *pid,
-                    name: display_name(&p.name, &p.cmd),
-                    from: from.clone(),
-                    start: *start,
-                    cpu: p.cpu,
-                    mem: p.mem,
-                })
-            })
+            // pruned above, so each one still runs as the process seen
+            .filter_map(|(pid, (from, _))| Some(Orphan::new(procs.get(pid)?, from.clone())))
             .collect();
         orphans.sort_by_key(|o| o.pid);
         orphans
@@ -561,18 +565,12 @@ impl EnvOrphans {
                 let session = agent
                     .and_then(|a| agents.iter().find(|r| r.root().pid == a.pid))
                     .and_then(|r| r.session.clone());
-                Some(Orphan {
-                    pid: p.pid,
-                    name: display_name(&p.name, &p.cmd),
-                    from: Label {
-                        kind,
-                        project: agent.map(|a| project(a.cwd.as_deref(), home)),
-                        session,
-                    },
-                    start: p.start,
-                    cpu: p.cpu,
-                    mem: p.mem,
-                })
+                let from = Label {
+                    kind,
+                    project: agent.map(|a| project(a.cwd.as_deref(), home)),
+                    session,
+                };
+                Some(Orphan::new(p, from))
             })
             .collect()
     }
