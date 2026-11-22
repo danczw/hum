@@ -1034,7 +1034,7 @@ mod tests {
     }
 
     fn scan(procs: &[(Pid, ProcInfo)]) -> Vec<Agent> {
-        agents::scan(&procs.iter().cloned().collect(), None, |_| None)
+        agents::scan(&procs.iter().cloned().collect(), None, &[], |_| None)
     }
 
     /// Draws with `view`, so its cursor carries over to the next frame.
@@ -1115,7 +1115,7 @@ mod tests {
         let procs: HashMap<Pid, ProcInfo> = procs.into_iter().collect();
         draw_agents(
             (width, height),
-            agents::scan(&procs, None, |_| None),
+            agents::scan(&procs, None, &[], |_| None),
             cores,
             view,
         )
@@ -1247,7 +1247,7 @@ mod tests {
         let mut procs = mockup();
         procs[2].1.cpu = 0.0;
         let procs: HashMap<Pid, ProcInfo> = procs.into_iter().collect();
-        let mut agents = agents::scan(&procs, None, |_| None);
+        let mut agents = agents::scan(&procs, None, &[], |_| None);
         let mut busy = BusyTracker::default();
         for _ in 0..10 {
             busy.update(&mut agents);
