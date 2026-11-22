@@ -56,7 +56,7 @@ pub fn listening(procs: &HashMap<Pid, ProcInfo>) -> Vec<Listener> {
     }
 
     let wanted: HashSet<u64> = sockets.iter().map(|&(_, inode, _)| inode).collect();
-    let holders = socket_holders(&wanted);
+    let holders = socket_holders(&wanted, procs.keys());
     let mut listeners: Vec<Listener> = sockets
         .into_iter()
         .map(|(port, inode, public)| Listener {
@@ -169,22 +169,19 @@ fn parse_addr(hex: &str) -> Option<IpAddr> {
     }
 }
 
-/// Maps the wanted socket inodes to every pid holding them. Sockets held by
-/// other users' processes stay unresolved, since their fd tables are not
-/// readable.
-fn socket_holders(wanted: &HashSet<u64>) -> HashMap<u64, Vec<Pid>> {
+/// Maps the wanted socket inodes to every pid in `pids` holding them.
+/// Sockets held by other users' processes stay unresolved, since their fd
+/// tables are not readable.
+fn socket_holders<'a>(
+    wanted: &HashSet<u64>,
+    pids: impl Iterator<Item = &'a Pid>,
+) -> HashMap<u64, Vec<Pid>> {
     let mut holders: HashMap<u64, Vec<Pid>> = HashMap::new();
     if wanted.is_empty() {
         return holders;
     }
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return holders;
-    };
-    for entry in entries.flatten() {
-        let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse().ok()) else {
-            continue;
-        };
-        let Ok(fds) = fs::read_dir(entry.path().join("fd")) else {
+    for &pid in pids {
+        let Ok(fds) = fs::read_dir(format!("/proc/{pid}/fd")) else {
             continue;
         };
         for fd in fds.flatten() {
@@ -197,7 +194,7 @@ fn socket_holders(wanted: &HashSet<u64>) -> HashMap<u64, Vec<Pid>> {
                 .and_then(|t| t.strip_suffix(']'))
                 .and_then(|t| t.parse().ok());
             if let Some(inode) = inode.filter(|i| wanted.contains(i)) {
-                holders.entry(inode).or_default().push(Pid::from_u32(pid));
+                holders.entry(inode).or_default().push(pid);
             }
         }
     }
