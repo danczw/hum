@@ -358,7 +358,7 @@ fn draw_cores(frame: &mut Frame, cores: &[f64], grid: CoreGrid, area: Rect, them
 /// Below both minimums the cores column goes first, then project gives way.
 fn agents_section(entries: &[Entry], width: u16, theme: &Theme) -> Section {
     let cores = width >= AGENTS_MIN;
-    let names = (width + if cores { 0 } else { CORES_SPAN }).saturating_sub(AGENTS_FIXED);
+    let names = name_room(width, AGENTS_FIXED, cores);
     let project =
         names.saturating_sub(PROCESS).min(PROJECT) + names.saturating_sub(PROCESS + PROJECT) / 4;
     let process = names - project;
@@ -400,16 +400,11 @@ fn agents_section(entries: &[Entry], width: u16, theme: &Theme) -> Section {
                 ))
                 .style(theme.accent)
             }
-            outline::Line::Subagent(s) => Row::new(columns(
-                [
-                    Cell::from(cut(&format!("    ◇ {}", s.kind), process_max)),
-                    Cell::from(""),
-                    Cell::from(""),
-                    Cell::from(""),
-                    Cell::from(""),
-                ],
-                cores,
-            )),
+            outline::Line::Subagent(s) => {
+                let mut cells = [""; 5].map(Cell::from);
+                cells[0] = Cell::from(cut(&format!("    ◇ {}", s.kind), process_max));
+                Row::new(columns(cells, cores))
+            }
             outline::Line::Proc(p) => Row::new(columns(
                 [
                     Cell::from(cut(
@@ -467,8 +462,7 @@ fn agents_section(entries: &[Entry], width: u16, theme: &Theme) -> Section {
 /// `width` is the whole box.
 fn orphans_section(orphans: &[Orphan], width: u16, theme: &Theme) -> Section {
     let cores = width >= SIDE_MIN;
-    let from_max =
-        usize::from((width + if cores { 0 } else { CORES_SPAN }).saturating_sub(ORPHANS_FIXED));
+    let from_max = usize::from(name_room(width, ORPHANS_FIXED, cores));
     let rows = orphans
         .iter()
         .map(|o| {
@@ -517,6 +511,12 @@ fn orphans_section(orphans: &[Orphan], width: u16, theme: &Theme) -> Section {
         ),
         inline: Vec::new(),
     }
+}
+
+/// Width a box of `width` leaves its name columns once `fixed` is taken,
+/// counting the cores column back in when the box drops it.
+fn name_room(width: u16, fixed: u16, cores: bool) -> u16 {
+    (width + if cores { 0 } else { CORES_SPAN }).saturating_sub(fixed)
 }
 
 /// The columns of an agents or orphans row, without cores unless `cores`.
