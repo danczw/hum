@@ -1085,7 +1085,7 @@ mod tests {
         }
     }
 
-    /// Draws `ports` with no agents or orphans.
+    /// Draws every port in `ports` with no agents or orphans.
     fn draw_ports(size: (u16, u16), ports: Vec<Port>) -> Vec<String> {
         let snapshot = Snapshot {
             gauges: gauges(eight_cores()),
@@ -1095,7 +1095,13 @@ mod tests {
         };
         let mut terminal = Terminal::new(TestBackend::new(size.0, size.1)).unwrap();
         terminal
-            .draw(|f| super::draw(f, &snapshot, &mut view()))
+            .draw(|f| {
+                let mut view = View {
+                    all_ports: true,
+                    ..view()
+                };
+                super::draw(f, &snapshot, &mut view)
+            })
             .unwrap();
         text(terminal.backend().buffer())
     }
@@ -1357,6 +1363,25 @@ mod tests {
         );
         let postgres = lines.iter().find(|l| l.contains("postgres")).unwrap();
         assert!(postgres.starts_with("│ :5432 "), "{lines:#?}");
+    }
+
+    #[test]
+    fn unreadable_holder_shows_a_dash_and_no_name() {
+        let lines = draw_ports(
+            (74, 20),
+            vec![Port {
+                port: 5432,
+                public: false,
+                holder: None,
+                owner: None,
+            }],
+        );
+        let row = lines.iter().find(|l| l.contains(":5432")).unwrap();
+        assert_eq!(
+            row.trim_end_matches([' ', '│']),
+            "│ :5432         -",
+            "{lines:#?}"
+        );
     }
 
     #[test]
@@ -1735,11 +1760,11 @@ mod tests {
 
     #[test]
     fn subagents_show_above_the_processes_of_their_agent() {
-        let agents = with_subagents();
         let mut view = view();
         let buf = draw_agents((74, 16), with_subagents(), eight_cores(), &mut view);
         let lines = text(&buf);
         assert!(lines[4].starts_with("│ ▸ ○ claude (4) "), "{lines:#?}");
+        let agents = with_subagents();
         view.outline.expand_all(&agents);
         let lines = text(&draw_agents((74, 16), agents, eight_cores(), &mut view));
         assert!(lines[5].starts_with("│     ◇ Explore  "), "{lines:#?}");
