@@ -413,17 +413,12 @@ fn agents_section(entries: &[Entry], width: u16, theme: &Theme) -> Section {
             }
             outline::Line::Subagent(s) => {
                 let mut cells = [""; 5].map(Cell::from);
-                cells[0] = Cell::from(cut(&format!("    └ ◇ {}", s.kind), process_max));
+                cells[0] = Cell::from(cut(&branch(1, &format!("◇ {}", s.kind)), process_max));
                 Row::new(columns(cells, cores))
             }
             outline::Line::Proc(p) => Row::new(columns(
                 [
-                    Cell::from(cut(
-                        // past the agent's status dot, so an agent without
-                        // a fold marker never reads as a child
-                        &format!("{}└ {}", "  ".repeat(p.depth + 1), p.name),
-                        process_max,
-                    )),
+                    Cell::from(cut(&branch(p.depth, &p.name), process_max)),
                     // Cell::default() spans zero columns and would shift the rest.
                     Cell::from(""),
                     num(p.pid.to_string()),
@@ -541,6 +536,13 @@ fn columns<T>(columns: [T; 5], cores: bool) -> Vec<T> {
         columns.remove(CORES_COL);
     }
     columns
+}
+
+/// `name` under an agent at `depth`, past the agent's status dot, so an
+/// agent without a fold marker never reads as a child. Subagents and
+/// processes share it, so neither reads as a child of the other.
+fn branch(depth: usize, name: &str) -> String {
+    format!("{}└ {name}", "  ".repeat(depth + 1))
 }
 
 /// Only ports of agents and orphans unless `all`. A port bound beyond
