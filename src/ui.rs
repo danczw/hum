@@ -167,8 +167,9 @@ struct Section {
     /// One per row.
     keys: Vec<Key>,
     widths: Vec<Constraint>,
-    /// The rows as short entries for a title line; only ports fold into one.
-    inline: Vec<Line<'static>>,
+    /// The rows as short entries, set in place of `rows` for a section that
+    /// folds into the bottom border of a compact box; only ports do.
+    inline: Option<Vec<Line<'static>>>,
 }
 
 pub fn draw(frame: &mut Frame, snapshot: &Snapshot, view: &mut View) {
@@ -206,7 +207,7 @@ pub fn draw(frame: &mut Frame, snapshot: &Snapshot, view: &mut View) {
         draw_cores(frame, &snapshot.gauges.cores, grid, cores, theme);
     }
 
-    let ports = |width| ports_section(&snapshot.ports, view.all_ports, width, theme);
+    let ports = |width| ports_section(&snapshot.ports, view.all_ports, width, compact, theme);
     let rows = view.outline.rows(&snapshot.agents);
     if wide {
         let side = (body.width * 2 / 5).max(SIDE_MIN);
@@ -469,7 +470,7 @@ fn agents_section(entries: &[Entry], width: u16, theme: &Theme) -> Section {
             ],
             cores,
         ),
-        inline: Vec::new(),
+        inline: None,
     }
 }
 
@@ -528,7 +529,7 @@ fn orphans_section(orphans: &[Orphan], width: u16, theme: &Theme) -> Section {
             ],
             cores,
         ),
-        inline: Vec::new(),
+        inline: None,
     }
 }
 
@@ -549,8 +550,15 @@ fn columns<T>(columns: [T; 5], cores: bool) -> Vec<T> {
 
 /// Only ports of agents and orphans unless `all`. A port bound beyond
 /// loopback gets a `*`, which warns when an agent or orphan owns it.
-/// `width` is the whole box.
-fn ports_section(ports: &[Listener], all: bool, width: u16, theme: &Theme) -> Section {
+/// `width` is the whole box. `compact`, the ports fold into its bottom
+/// border, see [`draw_footer`].
+fn ports_section(
+    ports: &[Listener],
+    all: bool,
+    width: u16,
+    compact: bool,
+    theme: &Theme,
+) -> Section {
     // process and agent split the rest 1:2; the floor never overshoots
     let agent_max = usize::from(width.saturating_sub(PORTS_FIXED)) * 2 / 3;
     let shown: Vec<&Listener> = ports.iter().filter(|p| all || p.owner.is_some()).collect();
@@ -565,21 +573,34 @@ fn ports_section(ports: &[Listener], all: bool, width: u16, theme: &Theme) -> Se
         spans.extend(star);
         spans
     };
-    let rows = shown
-        .iter()
-        .map(|p| {
-            Row::new([
-                Cell::from(Line::from(port(p))),
-                num(p.pid().map_or_else(|| "-".into(), |p| p.to_string())),
-                Cell::from(p.name().to_string()),
-                Cell::from(
-                    p.owner
-                        .as_ref()
-                        .map_or_else(String::new, |o| o.fit(agent_max)),
-                ),
-            ])
-        })
-        .collect();
+    // `:3000* node claude/hum`, or `:5432 postgres` without an owner
+    let inline = |p: &&Listener| {
+        let mut spans = port(p);
+        spans.extend(
+            std::iter::once(p.name().to_string())
+                .chain(p.owner.as_ref().map(Owner::to_string))
+                .filter(|s| !s.is_empty())
+                .map(|s| Span::raw(format!(" {s}"))),
+        );
+        Line::from(spans)
+    };
+    let row = |p: &&Listener| {
+        Row::new([
+            Cell::from(Line::from(port(p))),
+            num(p.pid().map_or_else(|| "-".into(), |p| p.to_string())),
+            Cell::from(p.name().to_string()),
+            Cell::from(
+                p.owner
+                    .as_ref()
+                    .map_or_else(String::new, |o| o.fit(agent_max)),
+            ),
+        ])
+    };
+    let (rows, inline) = if compact {
+        (Vec::new(), Some(shown.iter().map(inline).collect()))
+    } else {
+        (shown.iter().map(row).collect(), None)
+    };
     Section {
         name: "ports",
         pane: focus::PORTS,
@@ -603,20 +624,7 @@ fn ports_section(ports: &[Listener], all: bool, width: u16, theme: &Theme) -> Se
             Constraint::Fill(1),
             Constraint::Fill(2),
         ],
-        // `:3000* node claude/hum`, or `:5432 postgres` without an owner
-        inline: shown
-            .iter()
-            .map(|p| {
-                let mut spans = port(p);
-                spans.extend(
-                    std::iter::once(p.name().to_string())
-                        .chain(p.owner.as_ref().map(Owner::to_string))
-                        .filter(|s| !s.is_empty())
-                        .map(|s| Span::raw(format!(" {s}"))),
-                );
-                Line::from(spans)
-            })
-            .collect(),
+        inline,
     }
 }
 
@@ -627,7 +635,8 @@ fn ports_section(ports: &[Listener], all: bool, width: u16, theme: &Theme) -> Se
 ///
 /// Each section is a box, and a header shows over at least one row or in
 /// an empty section. `compact`, the sections share one box split by `├ name ─┤`
-/// lines, drop their headers, and ports fold into the bottom border.
+/// lines and drop their headers, and a last section with
+/// [`Section::inline`] entries folds into the bottom border.
 fn stack<const N: usize>(
     frame: &mut Frame,
     sections: [Section; N],
@@ -636,7 +645,7 @@ fn stack<const N: usize>(
     theme: &Theme,
     focus: &mut Focus,
 ) {
-    let footer = compact && sections[N - 1].pane == focus::PORTS;
+    let footer = sections[N - 1].inline.is_some();
     let header = u16::from(!compact);
     let mut left = area.height;
     let mut heights = [0; N];
@@ -651,13 +660,7 @@ fn stack<const N: usize>(
         *h = chrome.min(left);
         left -= *h;
     }
-    let rows: [usize; N] = std::array::from_fn(|i| {
-        if footer && i == N - 1 {
-            0
-        } else {
-            sections[i].rows.len()
-        }
-    });
+    let rows = sections.each_ref().map(|s| s.rows.len());
     // header and data lines; a section given one line shows a row without
     // its header, see `draw_section`
     let mut lines = [0; N];
@@ -768,7 +771,7 @@ fn draw_footer(frame: &mut Frame, section: Section, area: Rect, theme: &Theme, f
     // corners, the closing space and at least one rule
     let width = spans.iter().map(Span::width).sum::<usize>();
     let mut room = usize::from(area.width).saturating_sub(width + 4);
-    let entries = &section.inline;
+    let entries = section.inline.as_deref().unwrap_or_default();
     let sep = |i| if i == 0 { " · " } else { "  " };
     let mut shown = 0;
     for (i, entry) in entries.iter().enumerate() {
@@ -1387,9 +1390,11 @@ mod tests {
             owner: None,
         }];
         let theme = Theme::ayu_mirage();
-        let section = ports_section(&ports, true, 74, &theme);
-        assert_eq!(section.inline[0].spans[1].content, "*");
-        assert_eq!(section.inline[0].spans[1].style, Style::default());
+        let inline = ports_section(&ports, true, 74, true, &theme)
+            .inline
+            .unwrap();
+        assert_eq!(inline[0].spans[1].content, "*");
+        assert_eq!(inline[0].spans[1].style, Style::default());
     }
 
     #[test]
@@ -1426,7 +1431,7 @@ mod tests {
             public: true,
             ..port(3000, 9120, "node", agent_owner("hum", None))
         }];
-        let section = ports_section(&ports, false, 74, &Theme::ayu_mirage());
+        let section = ports_section(&ports, false, 74, false, &Theme::ayu_mirage());
         assert_eq!((section.count, section.total), (1, None));
     }
 
