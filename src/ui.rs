@@ -1903,7 +1903,7 @@ mod tests {
         assert!(!shows(&buf, "4125"));
         // so does collapsing every tree, on the next draw
         view.outline.expand_all(&agents);
-        view.focus.last();
+        view.focus.jump(usize::MAX);
         draw_view((74, 16), sessions(), &mut view);
         view.focus.step(-1);
         draw_view((74, 16), sessions(), &mut view);
