@@ -82,7 +82,7 @@ impl Outline {
                 self.open.remove(&root);
             }
         }
-        (at != root && !self.open.contains(&root)).then_some(root)
+        self.hidden(at, root)
     }
 
     /// Forgets the sessions that exited or have no children left, so
@@ -96,8 +96,13 @@ impl Outline {
             .map(Agent::key)
             .collect();
         self.open.retain(|k| roots.contains(k));
-        let root = tree_of(agents, at?)?.key();
-        (at != Some(root) && !self.open.contains(&root)).then_some(root)
+        let at = at?;
+        self.hidden(at, tree_of(agents, at)?.key())
+    }
+
+    /// `root` when the row `at` below it sits in a closed tree.
+    fn hidden(&self, at: Key, root: Key) -> Option<Key> {
+        (at != root && !self.open.contains(&root)).then_some(root)
     }
 
     /// Childless roots stay closed, so children spawned later start
