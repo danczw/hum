@@ -4,7 +4,7 @@
 
 A small terminal monitor for machines running coding agents. Built with [ratatui](https://ratatui.rs) and [sysinfo](https://crates.io/crates/sysinfo). Linux only.
 
-![hum watching one Claude Code session. The agent idles with an empty circle, an orphaned sleep process appears, a Python server under the agent opens port 8765, then a shell loop uses a full core and the agent's circle fills.](assets/demo.gif)
+![hum watching two Claude Code sessions. One session's circle fills as three subagents start under it, a Python server under the agent opens port 8765, a shell loop uses a full core and an orphaned sleep process appears. As the tasks end their rows clear and the circle empties.](assets/demo.gif)
 
 - CPU, memory and swap
 - Agents (claude, codex, aider, gemini, ...) with their process trees, oldest first, marked `●` while busy and `○` while idle. Claude Code reports its status in its session file; other agents count as busy while their tree uses cpu. Claude Code subagents show as `◇` rows under their session while they run, and keep it busy
