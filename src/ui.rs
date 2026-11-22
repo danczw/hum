@@ -384,7 +384,7 @@ fn agents_section(entries: &[Entry], width: u16, theme: &Theme) -> Section {
                     _ if open => ('▾', String::new()),
                     n => ('▸', format!(" ({n})")),
                 };
-                let (status, status_style) = match agent.busy {
+                let (status, status_style) = match agent.busy() {
                     true => ('●', theme.accent),
                     false => ('○', theme.dim),
                 };
@@ -1755,7 +1755,7 @@ mod tests {
         let mut view = view();
         let buf = draw_agents((74, 16), with_subagents(), eight_cores(), &mut view);
         let lines = text(&buf);
-        assert!(lines[4].starts_with("│ ▸ ○ claude (4) "), "{lines:#?}");
+        assert!(lines[4].starts_with("│ ▸ ● claude (4) "), "{lines:#?}");
         let agents = with_subagents();
         view.outline.expand_all(&agents);
         let lines = text(&draw_agents((74, 16), agents, eight_cores(), &mut view));
@@ -1785,7 +1785,7 @@ mod tests {
         let mut view = view();
         view.outline.expand_all(&agents);
         let lines = text(&draw_agents((74, 16), agents, eight_cores(), &mut view));
-        assert!(lines[4].starts_with("│ ▾ ○ claude "), "{lines:#?}");
+        assert!(lines[4].starts_with("│ ▾ ● claude "), "{lines:#?}");
         assert!(lines[5].starts_with("│     ◇ Explore "), "{lines:#?}");
     }
 

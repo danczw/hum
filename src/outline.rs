@@ -150,7 +150,7 @@ mod tests {
                 kind: "claude",
                 project: String::new(),
                 procs: vec![proc(pid, 0), proc(pid + 1, 1)],
-                busy: false,
+                cpu_busy: false,
                 reported: None,
                 session: None,
                 session_id: None,

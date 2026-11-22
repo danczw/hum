@@ -113,11 +113,11 @@ pub struct Agent {
     pub project: String,
     /// The agent process first, then its descendants depth-first.
     pub procs: Vec<Proc>,
-    /// Set by [`BusyTracker::update`]; true while a subagent runs, else
-    /// without [`Agent::reported`], false until a window of samples exists.
-    pub busy: bool,
+    /// Tree cpu above [`BUSY_CORES`] over a full window, set by
+    /// [`BusyTracker::update`].
+    pub cpu_busy: bool,
     /// Busy or idle as the agent itself reports it, see
-    /// [`SessionFile::busy`]; None leaves `busy` to tree cpu.
+    /// [`SessionFile::busy`]; None leaves [`Agent::busy`] to tree cpu.
     pub reported: Option<bool>,
     /// Tells apart agents of the same kind and project, see [`name_sessions`];
     /// None when the agent is the only one.
@@ -144,6 +144,13 @@ impl Agent {
 
     pub fn key(&self) -> Key {
         self.root().key()
+    }
+
+    /// True while a subagent runs, as the session may sit at its prompt
+    /// while a background subagent works; else [`Agent::reported`], else
+    /// [`Agent::cpu_busy`].
+    pub fn busy(&self) -> bool {
+        !self.subagents.is_empty() || self.reported.unwrap_or(self.cpu_busy)
     }
 
     /// True when `of` names one of the agent's processes.
@@ -209,7 +216,7 @@ pub fn scan(
                 kind,
                 project: project(procs[&pid].cwd.as_deref(), home),
                 procs: tree,
-                busy: false,
+                cpu_busy: false,
                 reported: None,
                 session: None,
                 session_id: None,
@@ -671,14 +678,9 @@ impl BusyTracker {
             // sampled with a reported status too, so the fallback has a full
             // window if the status goes away
             window.push_back(agent.cpu());
-            // the session may sit at its prompt while a background subagent
-            // works
-            agent.busy = !agent.subagents.is_empty()
-                || agent.reported.unwrap_or_else(|| {
-                    // cpu is in percent of one core
-                    let mean = window.iter().sum::<f32>() / window.len() as f32 / 100.0;
-                    window.len() == self.window && mean > BUSY_CORES
-                });
+            // cpu is in percent of one core
+            let mean = window.iter().sum::<f32>() / window.len() as f32 / 100.0;
+            agent.cpu_busy = window.len() == self.window && mean > BUSY_CORES;
         }
     }
 }
@@ -733,7 +735,6 @@ impl Sessions {
                 }
             }
         }
-        // after the subagents, which count a session busy
         self.busy.update(&mut agents);
         let orphans = merge(
             self.tracker.update(procs, &agents),
@@ -1161,7 +1162,7 @@ mod tests {
             agents = session(10, 100, cores);
             busy.update(&mut agents);
         }
-        agents[0].busy
+        agents[0].busy()
     }
 
     #[test]
@@ -1193,7 +1194,7 @@ mod tests {
         busy_after(&mut busy, WINDOW, 1.0);
         let mut agents = session(10, 500, 1.0);
         busy.update(&mut agents);
-        assert!(!agents[0].busy);
+        assert!(!agents[0].busy());
     }
 
     /// A claude session in /home/u/code/hum at `cores`, whose session file
@@ -1217,12 +1218,12 @@ mod tests {
         for _ in 0..2 * WINDOW {
             let mut agents = reporting(0.01, Some(true));
             busy.update(&mut agents);
-            assert!(agents[0].busy);
+            assert!(agents[0].busy());
         }
         // a dev server spinning under a session at its prompt
         let mut agents = reporting(1.0, Some(false));
         busy.update(&mut agents);
-        assert!(!agents[0].busy);
+        assert!(!agents[0].busy());
     }
 
     #[test]
@@ -1234,7 +1235,7 @@ mod tests {
             busy.update(&mut agents);
         }
         assert_eq!(agents[0].reported, None);
-        assert!(agents[0].busy);
+        assert!(agents[0].busy());
     }
 
     #[test]
@@ -1486,7 +1487,7 @@ mod tests {
         fs::remove_dir_all(&config).unwrap();
         assert_eq!(agents[0].reported, Some(false));
         assert_eq!(agents[0].subagents.len(), 1);
-        assert!(agents[0].busy);
+        assert!(agents[0].busy());
     }
 
     #[test]
