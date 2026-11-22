@@ -101,6 +101,10 @@ impl Proc {
             start: p.start,
         }
     }
+
+    pub fn key(&self) -> Key {
+        key(self.pid, self.start)
+    }
 }
 
 pub struct Agent {
@@ -136,6 +140,15 @@ impl Agent {
     /// The agent process itself, first of [`Agent::procs`].
     pub fn root(&self) -> &Proc {
         &self.procs[0]
+    }
+
+    pub fn key(&self) -> Key {
+        self.root().key()
+    }
+
+    /// True when `of` names one of the agent's processes.
+    pub fn holds(&self, of: Key) -> bool {
+        self.procs.iter().any(|p| p.key() == of)
     }
 
     /// Rows below the agent in its tree: processes and subagents.
@@ -428,6 +441,10 @@ impl Orphan {
             mem: p.mem,
         }
     }
+
+    pub fn key(&self) -> Key {
+        key(self.pid, self.start)
+    }
 }
 
 /// The session a port's process belongs to: `claude/hum`, or
@@ -589,16 +606,14 @@ fn marker(environ: &[u8]) -> Option<Marker> {
 /// Which agent or orphan the process `pid` started at `start` belongs to,
 /// for tagging ports. A reused pid matches neither.
 pub fn owner(agents: &[Agent], orphans: &[Orphan], pid: Pid, start: u64) -> Option<Owner> {
-    if let Some(agent) = agents
-        .iter()
-        .find(|a| a.procs.iter().any(|p| (p.pid, p.start) == (pid, start)))
-    {
+    let of = key(pid, start);
+    if let Some(agent) = agents.iter().find(|a| a.holds(of)) {
         return Some(Owner {
             label: agent.label(),
             orphan: false,
         });
     }
-    let orphan = orphans.iter().find(|o| (o.pid, o.start) == (pid, start))?;
+    let orphan = orphans.iter().find(|o| o.key() == of)?;
     Some(Owner {
         label: orphan.from.clone(),
         orphan: true,
@@ -646,14 +661,10 @@ impl BusyTracker {
     }
 
     pub fn update(&mut self, agents: &mut [Agent]) {
-        let roots: HashSet<Key> = agents
-            .iter()
-            .map(|a| key(a.root().pid, a.root().start))
-            .collect();
+        let roots: HashSet<Key> = agents.iter().map(Agent::key).collect();
         self.samples.retain(|root, _| roots.contains(root));
         for agent in agents {
-            let root = agent.root();
-            let window = self.samples.entry(key(root.pid, root.start)).or_default();
+            let window = self.samples.entry(agent.key()).or_default();
             if window.len() == self.window {
                 window.pop_front();
             }

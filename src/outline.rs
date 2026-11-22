@@ -3,7 +3,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crate::agents::{Agent, Proc};
 use crate::claude::Subagent;
-use crate::focus::{Key, key};
+use crate::focus::Key;
 
 /// The agents section as rows: each agent, and below an open one its
 /// subagents and processes. Only open roots are kept, so a new session
@@ -37,7 +37,7 @@ impl Outline {
     pub fn rows<'a>(&self, agents: &'a [Agent]) -> Vec<Entry<'a>> {
         let mut rows = Vec::new();
         for agent in agents {
-            let root = root(agent);
+            let root = agent.key();
             let open = self.open.contains(&root);
             rows.push(Entry {
                 key: root,
@@ -54,7 +54,7 @@ impl Outline {
                 line: Line::Subagent(s),
             }));
             rows.extend(agent.procs[1..].iter().map(|p| Entry {
-                key: key(p.pid, p.start),
+                key: p.key(),
                 line: Line::Proc(p),
             }));
         }
@@ -65,7 +65,7 @@ impl Outline {
     /// cursor goes when `at` no longer shows or the key moves it.
     pub fn fold(&mut self, agents: &[Agent], at: Key, fold: Fold) -> Option<Key> {
         let agent = tree_of(agents, at)?;
-        let root = root(agent);
+        let root = agent.key();
         match fold {
             Fold::Collapse if at != root => return Some(root),
             // kept closed, so children spawned later start collapsed
@@ -93,10 +93,10 @@ impl Outline {
         let roots: HashSet<Key> = agents
             .iter()
             .filter(|a| a.has_children())
-            .map(root)
+            .map(Agent::key)
             .collect();
         self.open.retain(|k| roots.contains(k));
-        let root = root(tree_of(agents, at?)?);
+        let root = tree_of(agents, at?)?.key();
         (at != Some(root) && !self.open.contains(&root)).then_some(root)
     }
 
@@ -104,17 +104,12 @@ impl Outline {
     /// collapsed.
     pub fn expand_all(&mut self, agents: &[Agent]) {
         self.open
-            .extend(agents.iter().filter(|a| a.has_children()).map(root));
+            .extend(agents.iter().filter(|a| a.has_children()).map(Agent::key));
     }
 
     pub fn collapse_all(&mut self) {
         self.open.clear();
     }
-}
-
-fn root(agent: &Agent) -> Key {
-    let p = agent.root();
-    key(p.pid, p.start)
 }
 
 /// `(u64::MAX, hash of the id)`: no pid reaches `u64::MAX`, so it never
@@ -127,10 +122,9 @@ fn subagent_key(id: &str) -> Key {
 
 /// The session whose tree holds the process or subagent `of`.
 fn tree_of(agents: &[Agent], of: Key) -> Option<&Agent> {
-    agents.iter().find(|a| {
-        a.procs.iter().any(|p| key(p.pid, p.start) == of)
-            || a.subagents.iter().any(|s| subagent_key(&s.id) == of)
-    })
+    agents
+        .iter()
+        .find(|a| a.holds(of) || a.subagents.iter().any(|s| subagent_key(&s.id) == of))
 }
 
 #[cfg(test)]
@@ -138,6 +132,7 @@ mod tests {
     use sysinfo::Pid;
 
     use super::*;
+    use crate::focus::key;
 
     /// A session per root pid, each with one child at `root + 1`.
     fn agents(roots: &[u32]) -> Vec<Agent> {
