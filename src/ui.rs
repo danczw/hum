@@ -992,17 +992,11 @@ mod tests {
     const GIB: u64 = 1024 * 1024 * 1024;
 
     fn root_proc(pid: u32, cmd: &str, dir: &str, mem: u64) -> (Pid, ProcInfo) {
-        let info = ProcInfo {
-            pid: Pid::from_u32(pid),
-            parent: Some(Pid::from_u32(1)),
-            start: 0,
-            name: cmd.into(),
-            cmd: vec![cmd.into()],
-            cpu: 12.0,
-            mem,
-            cwd: Some(PathBuf::from(dir)),
-        };
-        (info.pid, info)
+        let (pid, mut info) = agents::fixture::proc(pid, 1, 0, cmd);
+        info.cpu = 12.0;
+        info.mem = mem;
+        info.cwd = Some(PathBuf::from(dir));
+        (pid, info)
     }
 
     fn child_proc(pid: u32, parent: u32, cmd: &str) -> (Pid, ProcInfo) {
