@@ -8,7 +8,7 @@ use ratatui::widgets::{
 };
 
 use crate::agents::{Agent, Orphan, Owner};
-use crate::focus::{self, Focus, Key, key};
+use crate::focus::{self, Focus, Key};
 use crate::label::cut;
 use crate::outline::{self, Entry, Fold, Outline};
 use crate::ports::Listener;
@@ -507,7 +507,7 @@ fn orphans_section(orphans: &[Orphan], width: u16, theme: &Theme) -> Section {
             cores,
         )),
         rows,
-        keys: orphans.iter().map(|o| key(o.pid, o.start)).collect(),
+        keys: orphans.iter().map(Orphan::key).collect(),
         // name as wide as its `process` header; `from` takes the rest
         widths: columns(
             [
