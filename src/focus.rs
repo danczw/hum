@@ -123,34 +123,35 @@ impl Focus {
         self.active && self.focused == section
     }
 
+    /// Shows the cursor; true when it was showing already.
+    fn wake(&mut self) -> bool {
+        std::mem::replace(&mut self.active, true)
+    }
+
     /// Moves the cursor `by` rows. The first move only shows the cursor.
     pub fn step(&mut self, by: isize) {
-        if std::mem::replace(&mut self.active, true) {
+        if self.wake() {
             self.move_by(by);
         }
     }
 
     /// Moves the cursor a page of the rows last shown.
     pub fn page(&mut self, down: bool) {
-        self.active = true;
+        self.wake();
         let page = self.panes[self.focused].page as isize;
         self.move_by(if down { page } else { -page });
     }
 
-    pub fn first(&mut self) {
-        self.active = true;
-        self.panes[self.focused].select(0);
-    }
-
-    pub fn last(&mut self) {
-        self.active = true;
-        self.panes[self.focused].select(usize::MAX);
+    /// Puts the cursor on row `index`, clamped to the last.
+    pub fn jump(&mut self, index: usize) {
+        self.wake();
+        self.panes[self.focused].select(index);
     }
 
     /// Moves focus `by` sections, wrapping and passing over sections
     /// without rows. The first press only shows the cursor, in agents.
     pub fn cycle(&mut self, by: isize) {
-        if std::mem::replace(&mut self.active, true) {
+        if self.wake() {
             self.advance(by);
         }
     }
@@ -250,7 +251,7 @@ mod tests {
         }
         let w = agents(&mut focus, 0..10, 4);
         assert_eq!((w.offset, w.rows, w.more), (1, 3, 6));
-        focus.last();
+        focus.jump(usize::MAX);
         let w = agents(&mut focus, 0..10, 4);
         // at the end every line holds a row
         assert_eq!((w.offset, w.rows, w.selected, w.more), (6, 4, 9, 0));
@@ -263,7 +264,7 @@ mod tests {
     fn one_line_shows_the_cursor_row_without_more() {
         let mut focus = Focus::default();
         agents(&mut focus, 0..10, 1);
-        focus.last();
+        focus.jump(usize::MAX);
         let w = agents(&mut focus, 0..10, 1);
         assert_eq!((w.offset, w.rows, w.more), (9, 1, 0));
         assert_eq!(agents(&mut focus, 0..10, 0).more, 0);
@@ -331,7 +332,7 @@ mod tests {
     fn clear_hides_the_cursor_then_reports_nothing_to_clear() {
         let mut focus = Focus::default();
         assert!(!focus.clear());
-        focus.last();
+        focus.jump(usize::MAX);
         agents(&mut focus, 0..10, 4);
         assert!(focus.clear());
         assert!(!focus.shows(0));
