@@ -38,13 +38,13 @@ struct App {
 }
 
 impl App {
-    fn new(tick: Duration) -> io::Result<Self> {
+    fn new(tick: Duration, agents: Vec<&'static str>) -> io::Result<Self> {
         let home = agents::canonical_home(std::env::var_os("HOME"));
         let claude = claude::config(std::env::var_os("CLAUDE_CONFIG_DIR"), home.as_deref());
         Ok(Self {
             sys: System::new().map_err(io::Error::other)?,
             ticks: 0,
-            sessions: Sessions::new(home, claude, tick),
+            sessions: Sessions::new(home, claude, agents, tick),
             ports: Vec::new(),
             tick,
         })
@@ -132,8 +132,8 @@ fn main() -> io::Result<ExitCode> {
         }
     };
     // leaked once; agent kinds are &'static str
-    agents::set_extra(opts.agents.into_iter().map(|a| &*a.leak()).collect());
-    let mut app = App::new(opts.interval)?;
+    let agents = opts.agents.into_iter().map(|a| &*a.leak()).collect();
+    let mut app = App::new(opts.interval, agents)?;
     let mut view = View {
         help: false,
         help_scroll: 0,
