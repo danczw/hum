@@ -1784,7 +1784,14 @@ mod tests {
         let mut view = view();
         view.outline.expand_all(&agents);
         let lines = text(&draw_agents((74, 10), agents, eight_cores(), &mut view));
-        assert!(lines.iter().any(|l| l.contains("    └ ◇ Explore")), "{lines:#?}");
+        // the processes branch from the session beside the subagents
+        let at = lines.iter().position(|l| l.contains("└ ◇ code-review"));
+        let at = at.expect("subagent row");
+        assert!(
+            lines[at - 1].starts_with("│     └ ◇ Explore "),
+            "{lines:#?}"
+        );
+        assert!(lines[at + 1].starts_with("│     └ bash "), "{lines:#?}");
     }
 
     #[test]
