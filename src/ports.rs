@@ -4,7 +4,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use sysinfo::Pid;
 
-use crate::agents::{ProcInfo, display_name, live};
+use crate::agents::{Owner, ProcInfo, display_name, live};
 
 /// Socket state code for LISTEN in /proc/net/tcp.
 const TCP_LISTEN: u8 = 0x0A;
@@ -15,11 +15,13 @@ pub struct Listener {
     pub holder: Option<Holder>,
     /// Bound to a non-loopback address, such as 0.0.0.0 or a LAN IP.
     pub public: bool,
+    /// The session or orphan holding the port, set each tick; see
+    /// [`crate::agents::owner`].
+    pub owner: Option<Owner>,
 }
 
 /// The process holding a listen socket; start time guards against pid
 /// reuse.
-#[derive(Clone)]
 pub struct Holder {
     pub pid: Pid,
     pub start: u64,
@@ -29,6 +31,11 @@ pub struct Holder {
 impl Listener {
     pub fn pid(&self) -> Option<Pid> {
         self.holder.as_ref().map(|h| h.pid)
+    }
+
+    /// Empty when the holder is unreadable.
+    pub fn name(&self) -> &str {
+        self.holder.as_ref().map_or("", |h| &h.name)
     }
 }
 
@@ -64,6 +71,7 @@ pub fn listening(procs: &HashMap<Pid, ProcInfo>) -> Vec<Listener> {
                     start: p.start,
                     name: display_name(&p.name, &p.cmd),
                 }),
+            owner: None,
         })
         .collect();
     listeners.sort_by_key(|l| (l.port, l.pid()));
@@ -273,6 +281,7 @@ mod tests {
                 name: "npm".into(),
             }),
             public: false,
+            owner: None,
         }
     }
 

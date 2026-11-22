@@ -6,13 +6,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Padding, Paragraph, Row, Table, TableState,
 };
-use sysinfo::Pid;
 
 use crate::agents::{Agent, Orphan, Owner};
 use crate::focus::{self, Focus, Key, key};
 use crate::label::cut;
 use crate::outline::{self, Entry, Fold, Outline};
-use crate::ports::Holder;
+use crate::ports::Listener;
 use crate::theme::Theme;
 
 // Numbers get fixed widths and text columns fill what is left, so a narrow
@@ -125,7 +124,7 @@ pub struct Snapshot {
     pub gauges: Gauges,
     pub agents: Vec<Agent>,
     pub orphans: Vec<Orphan>,
-    pub ports: Vec<Port>,
+    pub ports: Vec<Listener>,
 }
 
 /// The gauge line and the per-core grid.
@@ -137,27 +136,6 @@ pub struct Gauges {
     /// (used, total) bytes.
     pub mem: (u64, u64),
     pub swap: (u64, u64),
-}
-
-pub struct Port {
-    pub port: u16,
-    /// Bound beyond loopback; marked `*`.
-    pub public: bool,
-    /// None when the socket's holder is unreadable.
-    pub holder: Option<Holder>,
-    /// The session or orphan holding the port; see [`crate::agents::owner`].
-    pub owner: Option<Owner>,
-}
-
-impl Port {
-    fn pid(&self) -> Option<Pid> {
-        self.holder.as_ref().map(|h| h.pid)
-    }
-
-    /// Empty when the holder is unreadable.
-    fn name(&self) -> &str {
-        self.holder.as_ref().map_or("", |h| &h.name)
-    }
 }
 
 /// A titled list of rows under a dim header naming the columns.
@@ -549,12 +527,12 @@ fn columns<T>(columns: [T; 5], cores: bool) -> Vec<T> {
 /// Only ports of agents and orphans unless `all`. A port bound beyond
 /// loopback gets a `*`, which warns when an agent or orphan owns it.
 /// `width` is the whole box.
-fn ports_section(ports: &[Port], all: bool, width: u16, theme: &Theme) -> Section {
+fn ports_section(ports: &[Listener], all: bool, width: u16, theme: &Theme) -> Section {
     // process and agent split the rest 1:2; the floor never overshoots
     let agent_max = usize::from(width.saturating_sub(PORTS_FIXED)) * 2 / 3;
-    let shown: Vec<&Port> = ports.iter().filter(|p| all || p.owner.is_some()).collect();
+    let shown: Vec<&Listener> = ports.iter().filter(|p| all || p.owner.is_some()).collect();
     // `:3000*`
-    let port = |p: &Port| {
+    let port = |p: &Listener| {
         let star = match (p.public, p.owner.is_some()) {
             (false, _) => None,
             (true, true) => Some(Span::styled("*", theme.warn)),
@@ -973,11 +951,13 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
     use ratatui::style::{Color, Modifier};
+    use sysinfo::Pid;
 
     use crate::agents::{self, BusyTracker, ProcInfo};
     use crate::claude::Subagent;
     use crate::focus::Focus;
     use crate::label::Label;
+    use crate::ports::Holder;
 
     const GIB: u64 = 1024 * 1024 * 1024;
 
@@ -1072,8 +1052,8 @@ mod tests {
         }
     }
 
-    fn port(port: u16, pid: u32, name: &str, owner: Option<Owner>) -> Port {
-        Port {
+    fn port(port: u16, pid: u32, name: &str, owner: Option<Owner>) -> Listener {
+        Listener {
             port,
             public: false,
             holder: Some(Holder {
@@ -1086,7 +1066,7 @@ mod tests {
     }
 
     /// Draws every port in `ports` with no agents or orphans.
-    fn draw_ports(size: (u16, u16), ports: Vec<Port>) -> Vec<String> {
+    fn draw_ports(size: (u16, u16), ports: Vec<Listener>) -> Vec<String> {
         let snapshot = Snapshot {
             gauges: gauges(eight_cores()),
             agents: Vec::new(),
@@ -1140,7 +1120,7 @@ mod tests {
             agents,
             orphans,
             ports: vec![
-                Port {
+                Listener {
                     public: true,
                     ..port(3000, 9120, "node", agent_owner("hum", None))
                 },
@@ -1369,7 +1349,7 @@ mod tests {
     fn unreadable_holder_shows_a_dash_and_no_name() {
         let lines = draw_ports(
             (74, 20),
-            vec![Port {
+            vec![Listener {
                 port: 5432,
                 public: false,
                 holder: None,
@@ -1386,7 +1366,7 @@ mod tests {
 
     #[test]
     fn public_port_without_an_agent_gets_a_plain_star() {
-        let ports = [Port {
+        let ports = [Listener {
             port: 22,
             public: true,
             holder: None,
@@ -1428,7 +1408,7 @@ mod tests {
 
     #[test]
     fn filter_hiding_nothing_counts_plainly() {
-        let ports = [Port {
+        let ports = [Listener {
             public: true,
             ..port(3000, 9120, "node", agent_owner("hum", None))
         }];
