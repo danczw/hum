@@ -468,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn owner_follows_the_agents_on_a_join_tick() {
+    fn owner_moves_to_the_orphan_on_a_join_tick() {
         let mut fake = Fake {
             rows: vec![(8123, 1)],
             ..Fake::default()
@@ -477,19 +477,33 @@ mod tests {
         let mut ports = Ports::new(fake);
         let procs = HashMap::from([proc(40, 1, 400, "claude"), proc(30, 40, 401, "python3")]);
         let agents = agents::scan(&procs, None, &[], |_| None);
-        let kind = |got: &[Listener]| -> Vec<Option<&str>> {
+        let owners = |got: &[Listener]| -> Vec<Option<(&str, bool)>> {
             got.iter()
-                .map(|l| l.owner.as_ref().map(|o| o.label.kind))
+                .map(|l| l.owner.as_ref().map(|o| (o.label.kind, o.orphan)))
                 .collect()
         };
-        assert_eq!(kind(&ports.observe(&procs, &agents, &[])), [Some("claude")]);
+        assert_eq!(
+            owners(&ports.observe(&procs, &agents, &[])),
+            [Some(("claude", false))]
+        );
 
-        // a reread would find no port; a join keeps it
+        // claude exited and python3 outlived it; a reread would find no port
         ports.reader.rows.clear();
         let procs = HashMap::from([proc(30, 1, 401, "python3")]);
-        let got = ports.observe(&procs, &agents::scan(&procs, None, &[], |_| None), &[]);
+        let orphan = Orphan {
+            pid: Pid::from_u32(30),
+            name: "python3".into(),
+            from: agents[0].label(),
+            start: 401,
+            cpu: 0.0,
+            mem: 0,
+        };
+        let got = ports.observe(&procs, &[], &[orphan]);
         assert_eq!(rows(&got), [(8123, Some(30), "python3")]);
-        assert_eq!(kind(&got), [None]);
+        assert_eq!(owners(&got), [Some(("claude", true))]);
+
+        // stamped each tick, so the owner clears once no list claims the holder
+        assert_eq!(owners(&ports.observe(&procs, &[], &[])), [None]);
     }
 
     #[test]
