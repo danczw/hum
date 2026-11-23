@@ -778,7 +778,8 @@ fn stack<const N: usize>(
             borders,
             divider,
             header,
-            lines: inner - u16::from(header),
+            // an empty box squeezed to its borders has no line for it
+            lines: inner.saturating_sub(u16::from(header)),
         }
     })
 }
@@ -1569,6 +1570,15 @@ mod tests {
         }
         let lines = plan(Rect::new(0, 0, 30, 9), &view.snapshot, &view.nav).lines();
         assert_eq!(lines.sections, [None; SECTIONS]);
+    }
+
+    #[test]
+    fn empty_box_squeezed_to_its_borders_gets_no_lines() {
+        let area = Rect::new(0, 0, 74, 14);
+        let slots = stack([30, 0, 0], [false; 3], area, false, false);
+        for slot in &slots[1..] {
+            assert!(matches!(slot, Slot::Rows { lines: 0, .. }));
+        }
     }
 
     #[test]
