@@ -19,7 +19,6 @@ pub trait Host {
     /// The socket inodes among `pid`'s fds; empty when its fd table is
     /// unreadable, as another user's is.
     fn socket_inodes(&self, pid: Pid) -> Vec<u64>;
-    /// The text of `/proc/meminfo`.
     fn meminfo(&self) -> Option<String>;
     /// A file's text; None when missing or unreadable.
     fn read(&self, path: &Path) -> Option<String>;
@@ -29,7 +28,6 @@ pub trait Host {
     fn times(&self, path: &Path) -> Option<Times>;
 }
 
-/// A file's timestamps.
 #[derive(Clone, Copy)]
 pub struct Times {
     pub modified: SystemTime,
@@ -71,7 +69,7 @@ fn field(line: &str, n: usize) -> Option<&str> {
     rest.split_whitespace().nth(n.checked_sub(3)?)
 }
 
-/// Reads /proc. Linux only.
+/// Reads the real /proc and filesystem. Linux only.
 #[derive(Clone, Copy, Default)]
 pub struct ProcHost;
 
