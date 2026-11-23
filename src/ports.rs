@@ -55,7 +55,8 @@ pub struct Ports<H = ProcHost> {
     read_at: Option<Instant>,
     /// Half a tick. Refreshes jitter by a few ms, so at an interval that
     /// divides [`PORT_REREAD`] a reread due on a tick would otherwise slip
-    /// to the next one.
+    /// to the next one. At most half of [`PORT_REREAD`], so the early
+    /// cpu-settle refresh of a long tick joins rather than rereads.
     slack: Duration,
     last: Vec<Listener>,
 }
@@ -65,7 +66,7 @@ impl<H: Host> Ports<H> {
         Self {
             host,
             read_at: None,
-            slack: tick / 2,
+            slack: (tick / 2).min(PORT_REREAD / 2),
             last: Vec::new(),
         }
     }
@@ -463,9 +464,25 @@ mod tests {
             [(8123, Some(10), "python3")]
         );
 
-        // a 10s interval rereads on every refresh
+        // a 10s gap rereads
         ports.host.listen.clear();
         assert!(ports_at(&mut ports, 15000).is_empty());
+    }
+
+    #[test]
+    fn long_tick_rereads_each_tick_but_not_on_the_settle_refresh() {
+        let mut ports = Ports::new(MemHost::default(), Duration::from_secs(10));
+        let procs = HashMap::from([proc(10, 1, 100, "python3")]);
+        let ports_at = |ports: &mut Ports<MemHost>, ms| ports.observe(&procs, after(ms), &[], &[]);
+        assert!(ports_at(&mut ports, 0).is_empty());
+        ports.host.listen.push((8123, 1));
+        ports.host.hold(1, &[10]);
+        // the cpu-settle refresh comes 0.2s in
+        assert!(ports_at(&mut ports, 200).is_empty());
+        assert_eq!(
+            rows(&ports_at(&mut ports, 10200)),
+            [(8123, Some(10), "python3")]
+        );
     }
 
     #[test]
