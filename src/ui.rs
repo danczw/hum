@@ -404,7 +404,7 @@ fn agents_section(entries: &[Entry], width: u16, theme: &Theme) -> Section {
                         Cell::from(name),
                         Cell::from(agent.label().fit_project(project_max)),
                         num(agent.root().pid.to_string()),
-                        num(fmt_cores(agent.cpu())),
+                        num(fmt_cores(agent.cpu)),
                         num(fmt_bytes(agent.mem())),
                     ],
                     cores,
