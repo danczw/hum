@@ -67,9 +67,7 @@ impl App {
                 .without_tasks(),
         );
         let procs = agents::snapshot(&self.sys);
-        let (agents, orphans) = self
-            .sessions
-            .observe(&procs, SystemTime::now(), Instant::now());
+        let (agents, orphans) = self.sessions.observe(&procs, SystemTime::now());
         if self.ticks.is_multiple_of(PORT_TICKS) {
             ports = ports::listening(&procs);
         } else {
