@@ -3,7 +3,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use sysinfo::{Pid, System};
 
@@ -716,18 +716,18 @@ fn read_cpu_ticks(pid: Pid) -> Option<u64> {
 #[derive(Default)]
 pub struct TreeCpu {
     /// (root pid, start time) -> tree ticks and when they were read.
-    prev: HashMap<Key, (u64, SystemTime)>,
+    prev: HashMap<Key, (u64, Instant)>,
 }
 
 impl TreeCpu {
     /// Sets each agent's cpu from the change in its tree ticks since the last
-    /// whole read. A first sight, a member that can't be read, or a clock
-    /// that went back keeps sysinfo's sum. A member reaped outside the tree
-    /// takes its ticks along, which reads 0 for that tick rather than below.
+    /// whole read. A first sight or a member that can't be read keeps
+    /// sysinfo's sum. A member reaped outside the tree takes its ticks along,
+    /// which reads 0 for that tick rather than below.
     pub fn update(
         &mut self,
         agents: &mut [Agent],
-        now: SystemTime,
+        now: Instant,
         read: impl Fn(Pid) -> Option<u64>,
     ) {
         let roots: HashSet<Key> = agents.iter().map(Agent::key).collect();
@@ -741,7 +741,7 @@ impl TreeCpu {
             };
             let prev = self.prev.insert(agent.key(), (ticks, now));
             let Some((before, then)) = prev else { continue };
-            let span = now.duration_since(then).map_or(0.0, |d| d.as_secs_f64());
+            let span = now.saturating_duration_since(then).as_secs_f64();
             if span > 0.0 {
                 let used = ticks.saturating_sub(before) as f64 / USER_HZ;
                 agent.cpu = (used / span * 100.0) as f32;
@@ -788,10 +788,13 @@ impl Sessions {
         }
     }
 
+    /// `now` dates subagent transcripts; `tick` times tree cpu, see
+    /// [`TreeCpu::update`].
     pub fn observe(
         &mut self,
         procs: &HashMap<Pid, ProcInfo>,
         now: SystemTime,
+        tick: Instant,
     ) -> (Vec<Agent>, Vec<Orphan>) {
         let (home, claude) = (self.home.as_deref(), self.claude.as_deref());
         let mut agents = scan(procs, home, &self.extra, |pid| {
@@ -805,7 +808,7 @@ impl Sessions {
                 }
             }
         }
-        self.cpu.update(&mut agents, now, self.stat);
+        self.cpu.update(&mut agents, tick, self.stat);
         self.busy.update(&mut agents);
         let orphans = merge(
             self.tracker.update(procs, &agents),
@@ -1306,8 +1309,14 @@ mod tests {
         assert!(ticks[1] >= ticks[0] + 10, "{ticks:?}");
     }
 
-    /// claude 10 at 0.2 cores in sysinfo with children `kids`, updated `secs`
-    /// after the epoch with each pid's clock ticks from `ticks`. Returns the
+    /// `secs` after an instant fixed for the test run.
+    fn after(secs: u64) -> Instant {
+        static START: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
+        *START + Duration::from_secs(secs)
+    }
+
+    /// claude 10 at 0.2 cores in sysinfo with children `kids`, updated at
+    /// [`after`] `secs` with each pid's clock ticks from `ticks`. Returns the
     /// tree's cores.
     fn tree_cores(cpu: &mut TreeCpu, kids: &[u32], secs: u64, ticks: &[(u32, u64)]) -> f32 {
         let (pid, mut root) = proc(10, 1, 100, "claude");
@@ -1320,8 +1329,7 @@ mod tests {
             .iter()
             .map(|&(pid, t)| (Pid::from_u32(pid), t))
             .collect();
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
-        cpu.update(&mut agents, now, |pid| ticks.get(&pid).copied());
+        cpu.update(&mut agents, after(secs), |pid| ticks.get(&pid).copied());
         cores(agents[0].cpu)
     }
 
@@ -1356,15 +1364,10 @@ mod tests {
     #[test]
     fn tree_cpu_without_previous_ticks_keeps_sysinfo() {
         let mut cpu = TreeCpu::default();
-        let at = |secs| SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
         let mut agents = session(10, 100, 0.4);
-        cpu.update(&mut agents, at(5), |_| Some(1000));
+        cpu.update(&mut agents, after(5), |_| Some(1000));
         assert_eq!(agents[0].cpu, agents[0].procs[0].cpu);
-        // the clock went back
-        let mut agents = session(10, 100, 0.4);
-        cpu.update(&mut agents, at(1), |_| Some(2000));
-        assert_eq!(agents[0].cpu, agents[0].procs[0].cpu);
-        cpu.update(&mut [], at(2), |_| None);
+        cpu.update(&mut [], after(2), |_| None);
         assert!(cpu.prev.is_empty());
     }
 
@@ -1655,7 +1658,7 @@ mod tests {
         sessions.environ = |_| None;
         sessions.stat = |_| None;
         let procs = HashMap::from([in_dir(proc(10, 1, 100, "claude"), "/x/hum")]);
-        let (agents, _) = sessions.observe(&procs, now);
+        let (agents, _) = sessions.observe(&procs, now, Instant::now());
         fs::remove_dir_all(&config).unwrap();
         assert_eq!(agents[0].reported, Some(false));
         assert_eq!(agents[0].subagents.len(), 1);
