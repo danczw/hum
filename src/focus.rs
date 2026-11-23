@@ -1,12 +1,12 @@
-use sysinfo::Pid;
+use crate::agents::ProcKey;
 
 /// Names a row across ticks so the cursor follows it when rows reorder:
 /// `(pid, start time)` for processes, `(port, pid)` for ports; subagents
 /// get theirs in [`crate::outline`].
 pub type Key = (u64, u64);
 
-pub fn key(pid: Pid, start: u64) -> Key {
-    (pid.as_u32().into(), start)
+pub fn key(proc: ProcKey) -> Key {
+    (proc.pid.as_u32().into(), proc.start)
 }
 
 /// Sections in the order `Tab` cycles through.
