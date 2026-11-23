@@ -100,7 +100,6 @@ fn same_process(file: &str, stat: impl FnOnce() -> Option<String>) -> bool {
         Some(Field::Str(v) | Field::Raw(v)) => v.trim().parse::<u64>(),
     };
     let Ok(start) = start else { return false };
-    // starttime is field 22
     stat().is_some_and(|stat| stat_field(&stat, 22).is_some_and(|t| t.parse() == Ok(start)))
 }
 
