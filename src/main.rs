@@ -20,19 +20,17 @@ use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use agents::Sessions;
 use cli::Action;
 use outline::Fold;
-use ports::Listener;
+use ports::{Ports, ProcSockets};
 use theme::Theme;
 use ui::{Gauges, Snapshot, View};
 
-/// Ports change rarely and resolving owners reads every fd in /proc.
-const PORT_TICKS: u32 = 5;
 /// sysinfo reports cpu as 0 until a second read, which needs this gap.
 const CPU_SETTLE: Duration = Duration::from_millis(200);
 
 struct App {
     sys: System,
-    ticks: u32,
     sessions: Sessions,
+    ports: Ports,
     tick: Duration,
 }
 
@@ -42,14 +40,13 @@ impl App {
         let claude = claude::config(std::env::var_os("CLAUDE_CONFIG_DIR"), home.as_deref());
         Ok(Self {
             sys: System::new().map_err(io::Error::other)?,
-            ticks: 0,
             sessions: Sessions::new(home, claude, agents, tick),
+            ports: Ports::new(ProcSockets),
             tick,
         })
     }
 
-    /// `ports` are the last snapshot's, rejoined or reread.
-    fn refresh(&mut self, mut ports: Vec<Listener>) -> Snapshot {
+    fn refresh(&mut self) -> Snapshot {
         self.sys.refresh_cpu_usage();
         self.sys.refresh_memory();
         self.sys.refresh_processes_specifics(
@@ -69,18 +66,7 @@ impl App {
         );
         let procs = agents::snapshot(&self.sys);
         let (agents, orphans) = self.sessions.observe(&procs, SystemTime::now());
-        if self.ticks.is_multiple_of(PORT_TICKS) {
-            ports = ports::listening(&procs);
-        } else {
-            ports::join(&mut ports, &procs);
-        }
-        self.ticks = self.ticks.wrapping_add(1);
-        for l in &mut ports {
-            l.owner = l
-                .holder
-                .as_ref()
-                .and_then(|h| agents::owner(&agents, &orphans, h.pid, h.start));
-        }
+        let ports = self.ports.observe(&procs, &agents, &orphans);
         Snapshot {
             gauges: Gauges::read(&self.sys),
             agents,
@@ -136,14 +122,14 @@ fn main() -> io::Result<ExitCode> {
 fn run(mut terminal: DefaultTerminal, app: &mut App, view: &mut View) -> io::Result<()> {
     // stamped before the refresh so its run time does not stretch the period
     let mut last_tick = Instant::now();
-    let mut snapshot = app.refresh(Vec::new());
+    let mut snapshot = app.refresh();
     // the second refresh comes early so cpu shows before a long tick ends
     let mut period = app.tick.min(CPU_SETTLE);
 
     loop {
         if last_tick.elapsed() >= period {
             last_tick = Instant::now();
-            snapshot = app.refresh(std::mem::take(&mut snapshot.ports));
+            snapshot = app.refresh();
             period = app.tick;
             // a refresh slower than the tick restarts it, so hum still idles a full tick
             if last_tick.elapsed() >= period {

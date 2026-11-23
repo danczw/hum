@@ -4,24 +4,28 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use sysinfo::Pid;
 
-use crate::agents::{Owner, ProcInfo, display_name, live};
+use crate::agents::{Agent, Orphan, Owner, ProcInfo, display_name, live, owner};
 
 /// Socket state code for LISTEN in /proc/net/tcp.
 const TCP_LISTEN: u8 = 0x0A;
+/// Ports change rarely and resolving holders reads every fd in /proc.
+const PORT_TICKS: u32 = 5;
 
+#[derive(Clone)]
 pub struct Listener {
     pub port: u16,
     /// None when the socket's holder is unreadable, e.g. another user's.
     pub holder: Option<Holder>,
     /// Bound to a non-loopback address, such as 0.0.0.0 or a LAN IP.
     pub public: bool,
-    /// The session or orphan holding the port, set each tick; see
-    /// [`crate::agents::owner`].
+    /// The session or orphan holding the port, set each tick by
+    /// [`Ports::observe`].
     pub owner: Option<Owner>,
 }
 
 /// The process holding a listen socket; start time guards against pid
 /// reuse.
+#[derive(Clone)]
 pub struct Holder {
     pub pid: Pid,
     pub start: u64,
@@ -39,13 +43,89 @@ impl Listener {
     }
 }
 
-/// Listening TCP ports (IPv4 and IPv6) read from /proc. Linux only.
-pub fn listening(procs: &HashMap<Pid, ProcInfo>) -> Vec<Listener> {
-    let mut sockets = Vec::new();
-    for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
-        let Ok(text) = fs::read_to_string(table) else {
-            continue;
+/// The kernel state ports are read from, injected so tests feed fixtures.
+pub trait SocketReader {
+    /// The text of each TCP socket table, IPv4 and IPv6; an unreadable one
+    /// is left out.
+    fn tables(&self) -> Vec<String>;
+    /// Where each of `pid`'s fds links, e.g. `socket:[4296]`; empty when
+    /// its fd table is unreadable, as another user's is.
+    fn fd_targets(&self, pid: Pid) -> Vec<String>;
+}
+
+/// Reads /proc. Linux only.
+pub struct ProcSockets;
+
+impl SocketReader for ProcSockets {
+    fn tables(&self) -> Vec<String> {
+        ["/proc/net/tcp", "/proc/net/tcp6"]
+            .into_iter()
+            .filter_map(|table| fs::read_to_string(table).ok())
+            .collect()
+    }
+
+    fn fd_targets(&self, pid: Pid) -> Vec<String> {
+        let Ok(fds) = fs::read_dir(format!("/proc/{pid}/fd")) else {
+            return Vec::new();
         };
+        fds.flatten()
+            .filter_map(|fd| {
+                fs::read_link(fd.path())
+                    .ok()?
+                    .into_os_string()
+                    .into_string()
+                    .ok()
+            })
+            .collect()
+    }
+}
+
+/// Fills listening ports from a process snapshot each tick: rereads the
+/// socket tables every [`PORT_TICKS`] ticks and joins the last read to the
+/// snapshot in between.
+pub struct Ports<R = ProcSockets> {
+    reader: R,
+    ticks: u32,
+    last: Vec<Listener>,
+}
+
+impl<R: SocketReader> Ports<R> {
+    pub fn new(reader: R) -> Self {
+        Self {
+            reader,
+            ticks: 0,
+            last: Vec::new(),
+        }
+    }
+
+    /// This tick's listeners, each tagged with the agent or orphan holding
+    /// it.
+    pub fn observe(
+        &mut self,
+        procs: &HashMap<Pid, ProcInfo>,
+        agents: &[Agent],
+        orphans: &[Orphan],
+    ) -> Vec<Listener> {
+        if self.ticks.is_multiple_of(PORT_TICKS) {
+            self.last = listening(&self.reader, procs);
+        } else {
+            join(&mut self.last, procs);
+        }
+        self.ticks = self.ticks.wrapping_add(1);
+        for l in &mut self.last {
+            l.owner = l
+                .holder
+                .as_ref()
+                .and_then(|h| owner(agents, orphans, h.pid, h.start));
+        }
+        self.last.clone()
+    }
+}
+
+/// Listening TCP ports (IPv4 and IPv6) with the process holding each.
+fn listening(reader: &impl SocketReader, procs: &HashMap<Pid, ProcInfo>) -> Vec<Listener> {
+    let mut sockets = Vec::new();
+    for text in reader.tables() {
         sockets.extend(
             text.lines()
                 .skip(1)
@@ -59,7 +139,7 @@ pub fn listening(procs: &HashMap<Pid, ProcInfo>) -> Vec<Listener> {
     // sorted, so the lowest pid wins among holders [`master`] cannot tell apart
     let mut pids: Vec<Pid> = procs.keys().copied().collect();
     pids.sort_unstable();
-    let holders = socket_holders(&wanted, &pids);
+    let holders = socket_holders(reader, &wanted, &pids);
     let mut listeners: Vec<Listener> = sockets
         .into_iter()
         .map(|(port, inode, public)| Listener {
@@ -95,7 +175,7 @@ fn master(pids: &[Pid], procs: &HashMap<Pid, ProcInfo>) -> Option<Pid> {
 /// Drops listeners whose holder exited since [`listening`], so a reused
 /// pid does not inherit the port, and renames the rest after what they run
 /// now. Ports are read every few ticks, `procs` every tick.
-pub fn join(ports: &mut Vec<Listener>, procs: &HashMap<Pid, ProcInfo>) {
+fn join(ports: &mut Vec<Listener>, procs: &HashMap<Pid, ProcInfo>) {
     ports.retain_mut(|l| {
         let Some(holder) = &mut l.holder else {
             return true;
@@ -175,22 +255,19 @@ fn parse_addr(hex: &str) -> Option<IpAddr> {
 /// `pids` order. Only `pids` are scanned, so a worker forked since they were
 /// read never passes for the master. Sockets held by other users' processes
 /// stay unresolved, since their fd tables are not readable.
-fn socket_holders(wanted: &HashSet<u64>, pids: &[Pid]) -> HashMap<u64, Vec<Pid>> {
+fn socket_holders(
+    reader: &impl SocketReader,
+    wanted: &HashSet<u64>,
+    pids: &[Pid],
+) -> HashMap<u64, Vec<Pid>> {
     let mut holders: HashMap<u64, Vec<Pid>> = HashMap::new();
     if wanted.is_empty() {
         return holders;
     }
     for &pid in pids {
-        let Ok(fds) = fs::read_dir(format!("/proc/{pid}/fd")) else {
-            continue;
-        };
-        for fd in fds.flatten() {
-            let Ok(target) = fs::read_link(fd.path()) else {
-                continue;
-            };
+        for target in reader.fd_targets(pid) {
             let inode = target
-                .to_str()
-                .and_then(|t| t.strip_prefix("socket:["))
+                .strip_prefix("socket:[")
                 .and_then(|t| t.strip_suffix(']'))
                 .and_then(|t| t.parse().ok());
             if let Some(inode) = inode.filter(|i| wanted.contains(i)) {
@@ -204,7 +281,7 @@ fn socket_holders(wanted: &HashSet<u64>, pids: &[Pid]) -> HashMap<u64, Vec<Pid>>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::fixture::proc;
+    use crate::agents::{self, fixture::proc};
 
     // Rows from a little-endian host.
     const HEADER: &str = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode";
@@ -285,18 +362,134 @@ mod tests {
         assert_eq!(master(&pids(&[12]), &procs), Some(Pid::from_u32(12)));
     }
 
-    #[test]
-    fn join_drops_a_port_whose_pid_was_reused() {
-        let mut procs = HashMap::from([proc(10, 1, 100, "npm"), proc(20, 1, 200, "vite")]);
-        let mut ports = vec![held(3000, 10, 100), held(5173, 20, 200)];
-        // pid 10 exec'd into node; pid 20 exited and was reused
-        procs.extend([proc(10, 1, 100, "node"), proc(20, 1, 300, "bash")]);
-        join(&mut ports, &procs);
-        let got: Vec<_> = ports
+    /// Socket tables and fd links held in memory.
+    #[derive(Default)]
+    struct Fake {
+        /// (port, inode) of each LISTEN row on 127.0.0.1.
+        rows: Vec<(u16, u64)>,
+        fds: HashMap<Pid, Vec<String>>,
+    }
+
+    impl Fake {
+        /// `pids` each hold socket `inode`, beside a pipe.
+        fn hold(&mut self, inode: u64, pids: &[u32]) {
+            for &pid in pids {
+                self.fds
+                    .entry(Pid::from_u32(pid))
+                    .or_default()
+                    .extend(["pipe:[1]".into(), format!("socket:[{inode}]")]);
+            }
+        }
+    }
+
+    impl SocketReader for Fake {
+        fn tables(&self) -> Vec<String> {
+            let rows = self.rows.iter().map(|(port, inode)| {
+                format!("   0: 0100007F:{port:04X} 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 {inode} 1 0000000000000000 100 0 0 10 0")
+            });
+            vec![
+                std::iter::once(HEADER.to_string())
+                    .chain(rows)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ]
+        }
+
+        fn fd_targets(&self, pid: Pid) -> Vec<String> {
+            self.fds.get(&pid).cloned().unwrap_or_default()
+        }
+    }
+
+    /// Port, holder pid and holder name of each listener.
+    fn rows(ports: &[Listener]) -> Vec<(u16, Option<u32>, &str)> {
+        ports
             .iter()
-            .map(|l| (l.port, l.holder.as_ref().unwrap().name.as_str()))
-            .collect();
-        assert_eq!(got, [(3000, "node")]);
+            .map(|l| (l.port, l.pid().map(|p| p.as_u32()), l.name()))
+            .collect()
+    }
+
+    #[test]
+    fn reread_picks_the_prefork_master_and_else_the_lowest_pid() {
+        let mut fake = Fake {
+            rows: vec![(80, 1), (9000, 2)],
+            ..Fake::default()
+        };
+        fake.hold(1, &[12, 11, 10]);
+        // unrelated holders of one socket, e.g. one passed over a unix socket
+        fake.hold(2, &[21, 20]);
+        let mut ports = Ports::new(fake);
+        // a fresh map each read, so its hash order varies
+        for _ in 0..PORT_TICKS * 8 {
+            let procs = HashMap::from([
+                proc(12, 10, 102, "nginx"),
+                proc(11, 10, 101, "nginx"),
+                proc(10, 1, 100, "nginx"),
+                proc(21, 1, 201, "worker"),
+                proc(20, 1, 200, "worker"),
+            ]);
+            let got = ports.observe(&procs, &[], &[]);
+            assert_eq!(
+                rows(&got),
+                [(80, Some(10), "nginx"), (9000, Some(20), "worker")]
+            );
+        }
+    }
+
+    #[test]
+    fn a_pid_reused_between_rereads_does_not_inherit_the_port() {
+        let mut fake = Fake {
+            rows: vec![(3000, 1), (5173, 2)],
+            ..Fake::default()
+        };
+        fake.hold(1, &[10]);
+        fake.hold(2, &[20]);
+        let mut ports = Ports::new(fake);
+        let procs = HashMap::from([proc(10, 1, 100, "npm"), proc(20, 1, 200, "vite")]);
+        assert_eq!(
+            rows(&ports.observe(&procs, &[], &[])),
+            [(3000, Some(10), "npm"), (5173, Some(20), "vite")]
+        );
+
+        // pid 10 exec'd into node; pid 20 exited and was reused
+        let procs = HashMap::from([proc(10, 1, 100, "node"), proc(20, 1, 300, "bash")]);
+        for _ in 1..PORT_TICKS {
+            assert_eq!(
+                rows(&ports.observe(&procs, &[], &[])),
+                [(3000, Some(10), "node")]
+            );
+        }
+
+        // the socket outlived vite in a holder whose fds are unreadable
+        ports.reader.fds.remove(&Pid::from_u32(20));
+        assert_eq!(
+            rows(&ports.observe(&procs, &[], &[])),
+            [(3000, Some(10), "node"), (5173, None, "")]
+        );
+    }
+
+    #[test]
+    fn owner_follows_the_agents_on_a_join_tick() {
+        let mut fake = Fake {
+            rows: vec![(8123, 1)],
+            ..Fake::default()
+        };
+        fake.hold(1, &[30]);
+        let mut ports = Ports::new(fake);
+        let procs = HashMap::from([proc(40, 1, 400, "claude"), proc(30, 40, 401, "python3")]);
+        let agents = agents::scan(&procs, None, &[], |_| None);
+        let kind = |got: &[Listener]| -> Vec<Option<&str>> {
+            got.iter()
+                .map(|l| l.owner.as_ref().map(|o| o.label.kind))
+                .collect()
+        };
+        assert_eq!(kind(&ports.observe(&procs, &agents, &[])), [Some("claude")]);
+
+        // a reread would find no port; a join keeps it
+        ports.reader.rows.clear();
+        let procs = HashMap::from([proc(30, 1, 401, "python3")]);
+        let got = ports.observe(&procs, &agents::scan(&procs, None, &[], |_| None), &[]);
+        assert_eq!(rows(&got), [(8123, Some(30), "python3")]);
+        assert_eq!(kind(&got), [None]);
     }
 
     #[test]
