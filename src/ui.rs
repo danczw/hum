@@ -9,9 +9,8 @@ use ratatui::widgets::{
 
 use crate::agents::{self, Agent, Orphan, Owner};
 use crate::label::cut;
-use crate::nav::Key;
-use crate::nav::cursor::{self, Focus};
-use crate::nav::outline::{self, Entry, Fold, Outline};
+use crate::nav::outline::{self, Entry};
+use crate::nav::{AGENTS, Lines, Nav, ORPHANS, PORTS, SECTIONS, Window};
 use crate::ports::Listener;
 use crate::theme::Theme;
 
@@ -85,54 +84,6 @@ const DIVIDER: border::Set = border::Set {
     ..border::ROUNDED
 };
 
-/// What the user toggles while hum runs.
-pub struct View {
-    /// Rows the open help is scrolled down, clamped when drawn.
-    pub help: Option<usize>,
-    /// Per-core bars under the gauge line.
-    pub cores: bool,
-    /// Every listening port, not only those of agents and orphans.
-    pub all_ports: bool,
-    pub theme: Theme,
-    pub focus: Focus,
-    pub outline: Outline,
-}
-
-impl View {
-    pub fn new(theme: Theme) -> Self {
-        Self {
-            help: None,
-            cores: false,
-            all_ports: false,
-            theme,
-            focus: Focus::default(),
-            outline: Outline::default(),
-        }
-    }
-
-    /// Expands or collapses the tree under the agents cursor.
-    pub fn fold(&mut self, agents: &[Agent], fold: Fold) {
-        if !self.focus.shows(cursor::AGENTS) {
-            return;
-        }
-        let Some(at) = self.focus.selected(cursor::AGENTS) else {
-            return;
-        };
-        if let Some(to) = self.outline.fold(agents, at, fold) {
-            self.focus.select(cursor::AGENTS, to);
-        }
-    }
-
-    /// Forgets exited sessions and moves a cursor on a hidden child to its
-    /// root, whether `c` collapsed the tree or the tree changed under it.
-    fn sync(&mut self, agents: &[Agent]) {
-        let at = self.focus.selected(cursor::AGENTS);
-        if let Some(to) = self.outline.sync(agents, at) {
-            self.focus.select(cursor::AGENTS, to);
-        }
-    }
-}
-
 /// Everything one frame shows, filled once per tick so drawing reads no
 /// `System`.
 pub struct Snapshot {
@@ -156,7 +107,7 @@ pub struct Gauges {
 /// A titled list of rows under a dim header naming the columns.
 struct Section {
     name: &'static str,
-    /// The section's cursor in [`Focus`].
+    /// Its cursor in [`Nav`]: [`AGENTS`], [`ORPHANS`] or [`PORTS`].
     pane: usize,
     count: usize,
     /// Rows before a filter, the 7 in `ports: 2/7`; `None` when it hid none.
@@ -164,27 +115,88 @@ struct Section {
     count_style: Style,
     header: Row<'static>,
     rows: Vec<Row<'static>>,
-    /// One per row.
-    keys: Vec<Key>,
     widths: Vec<Constraint>,
     /// The rows as short entries, set in place of `rows` for a section that
     /// folds into the bottom border of a compact box; only ports do.
     inline: Option<Vec<Line<'static>>>,
 }
 
-pub fn draw(frame: &mut Frame, snapshot: &Snapshot, view: &mut View) {
-    view.sync(&snapshot.agents);
-    let theme = &view.theme;
-    let focus = &mut view.focus;
-    let area = frame.area();
-    if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
-        let [gauges, hint] = Layout::vertical([Constraint::Length(1); 2]).areas(area);
-        draw_gauges(frame, &snapshot.gauges, gauges, theme);
-        frame.render_widget(Line::styled("too small", theme.dim), hint);
-        return;
+/// Where one frame puts each part, worked out before drawing so [`Nav`]
+/// can fit its cursors to the lines each section gets.
+pub struct Plan {
+    gauges: Rect,
+    /// None below [`MIN_WIDTH`] x [`MIN_HEIGHT`], where a hint shows instead.
+    body: Option<Body>,
+}
+
+/// Everything below the gauge line.
+struct Body {
+    grid: Option<(CoreGrid, Rect)>,
+    compact: bool,
+    /// Indexed by [`AGENTS`], [`ORPHANS`] and [`PORTS`].
+    slots: [Slot; SECTIONS],
+    help: Option<HelpBox>,
+}
+
+/// Where a section draws.
+enum Slot {
+    /// A box, or a part of a compact one, with `lines` data lines below a
+    /// header when `header`.
+    Rows {
+        area: Rect,
+        borders: Borders,
+        /// Opens with `├`, below another section in a compact box.
+        divider: bool,
+        header: bool,
+        lines: u16,
+    },
+    /// Folded into the bottom border of a compact box, see [`draw_footer`].
+    Footer(Rect),
+}
+
+impl Slot {
+    fn width(&self) -> u16 {
+        match self {
+            Self::Rows { area, .. } | Self::Footer(area) => area.width,
+        }
     }
-    let grid = view
-        .cores
+}
+
+/// The gauge line and a hint below it, in a pane too small for more.
+fn too_small(area: Rect) -> [Rect; 2] {
+    Layout::vertical([Constraint::Length(1); 2]).areas(area)
+}
+
+/// A section's rounded box, or its part of a compact one.
+fn block(borders: Borders, divider: bool) -> Block<'static> {
+    Block::new()
+        .borders(borders)
+        .border_set(if divider { DIVIDER } else { border::ROUNDED })
+}
+
+impl Plan {
+    /// The lines each section and the help get, for [`Nav::frame`].
+    pub fn lines(&self) -> Lines {
+        let Some(Body { slots, help, .. }) = &self.body else {
+            return Lines::default();
+        };
+        Lines {
+            sections: slots.each_ref().map(|slot| match slot {
+                Slot::Rows { lines, .. } => Some(usize::from(*lines)),
+                Slot::Footer(_) => None,
+            }),
+            help_overflow: help.as_ref().map_or(0, |h| h.lines.len() - h.shown),
+        }
+    }
+}
+
+pub fn plan(area: Rect, snapshot: &Snapshot, nav: &Nav) -> Plan {
+    if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
+        let [gauges, _] = too_small(area);
+        return Plan { gauges, body: None };
+    }
+    let grid = nav
+        .cores()
         .then(|| CoreGrid::new(snapshot.gauges.cores.len(), area.width));
     let wide = area.width >= WIDE;
     // the rows compact sections need for their titles: three stacked, two
@@ -202,39 +214,97 @@ pub fn draw(frame: &mut Frame, snapshot: &Snapshot, view: &mut View) {
         Constraint::Fill(1),
     ])
     .areas(area);
-    draw_gauges(frame, &snapshot.gauges, gauges, theme);
-    if let Some(grid) = grid {
-        draw_cores(frame, &snapshot.gauges.cores, grid, cores, theme);
-    }
 
-    let ports = |width| ports_section(&snapshot.ports, view.all_ports, width, compact, theme);
-    let rows = view.outline.rows(&snapshot.agents);
-    if wide {
+    let rows = [
+        nav.rows(&snapshot.agents).len(),
+        snapshot.orphans.len(),
+        nav.ports(&snapshot.ports).len(),
+    ];
+    let shows = [AGENTS, ORPHANS, PORTS].map(|s| nav.shows(s));
+    // ports end the stack they are in, so a compact box folds them
+    let slots = if wide {
         let side = (body.width * 2 / 5).max(SIDE_MIN);
         let [left, right] =
             Layout::horizontal([Constraint::Fill(1), Constraint::Length(side)]).areas(body);
-        let agents = agents_section(&rows, left.width, theme);
-        let orphans = orphans_section(&snapshot.orphans, right.width, theme);
-        stack(frame, [agents], left, compact, theme, focus);
-        stack(
-            frame,
-            [orphans, ports(right.width)],
+        let [agents] = stack([rows[AGENTS]], [shows[AGENTS]], left, compact, false);
+        let [orphans, ports] = stack(
+            [rows[ORPHANS], rows[PORTS]],
+            [shows[ORPHANS], shows[PORTS]],
             right,
             compact,
-            theme,
-            focus,
+            compact,
         );
+        [agents, orphans, ports]
     } else {
-        let agents = agents_section(&rows, body.width, theme);
-        let orphans = orphans_section(&snapshot.orphans, body.width, theme);
-        let ports = ports(body.width);
-        stack(frame, [agents, orphans, ports], body, compact, theme, focus);
+        stack(rows, shows, body, compact, compact)
+    };
+    Plan {
+        gauges,
+        body: Some(Body {
+            grid: grid.map(|g| (g, cores)),
+            compact,
+            slots,
+            help: nav.help().map(|_| HelpBox::new(area)),
+        }),
     }
+}
 
-    if let Some(scroll) = &mut view.help {
-        draw_help(frame, scroll);
+/// Paints `plan` with the rows `windows` shows of each section.
+pub fn draw(
+    frame: &mut Frame,
+    snapshot: &Snapshot,
+    nav: &Nav,
+    theme: &Theme,
+    plan: Plan,
+    windows: &[Window; SECTIONS],
+) {
+    draw_gauges(frame, &snapshot.gauges, plan.gauges, theme);
+    let Some(Body {
+        grid,
+        compact,
+        slots,
+        help,
+    }) = plan.body
+    else {
+        let [_, hint] = too_small(frame.area());
+        frame.render_widget(Line::styled("too small", theme.dim), hint);
+        return;
+    };
+    if let Some((grid, area)) = grid {
+        draw_cores(frame, &snapshot.gauges.cores, grid, area, theme);
     }
-    focus.settle();
+    let rows = nav.rows(&snapshot.agents);
+    let ports = nav.ports(&snapshot.ports);
+    let sections = [
+        agents_section(&rows, slots[AGENTS].width(), theme),
+        orphans_section(&snapshot.orphans, slots[ORPHANS].width(), theme),
+        ports_section(
+            &ports,
+            snapshot.ports.len(),
+            slots[PORTS].width(),
+            compact,
+            theme,
+        ),
+    ];
+    for ((section, slot), window) in sections.into_iter().zip(slots).zip(windows) {
+        match slot {
+            Slot::Rows {
+                area,
+                borders,
+                divider,
+                header,
+                ..
+            } => {
+                let shows = nav.shows(section.pane);
+                let block = block(borders, divider);
+                draw_section(frame, section, area, block, header, shows, window, theme);
+            }
+            Slot::Footer(area) => draw_footer(frame, section, area, theme),
+        }
+    }
+    if let (Some(help), Some(scroll)) = (help, nav.help()) {
+        draw_help(frame, help, scroll);
+    }
 }
 
 /// `cpu ⎣⣿⣿⡆⠀  34%⎦   mem ⎣⣿⣿⣿⠀ 12.1/31G⎦   swp ⎣⡀⠀⠀⠀ 0.0/8G⎦` on one
@@ -432,7 +502,7 @@ fn agents_section(entries: &[Entry], width: u16, theme: &Theme) -> Section {
         .collect();
     Section {
         name: "agents",
-        pane: cursor::AGENTS,
+        pane: AGENTS,
         count: entries
             .iter()
             .filter(|e| matches!(e.line, outline::Line::Root { .. }))
@@ -450,7 +520,6 @@ fn agents_section(entries: &[Entry], width: u16, theme: &Theme) -> Section {
             cores,
         )),
         rows,
-        keys: entries.iter().map(|e| e.key.clone()).collect(),
         widths: columns(
             [
                 Constraint::Length(process),
@@ -489,7 +558,7 @@ fn orphans_section(orphans: &[Orphan], width: u16, theme: &Theme) -> Section {
         .collect();
     Section {
         name: "orphans",
-        pane: cursor::ORPHANS,
+        pane: ORPHANS,
         count: orphans.len(),
         total: None,
         count_style: if orphans.is_empty() {
@@ -508,7 +577,6 @@ fn orphans_section(orphans: &[Orphan], width: u16, theme: &Theme) -> Section {
             cores,
         )),
         rows,
-        keys: orphans.iter().map(|o| Key::Proc(o.key())).collect(),
         // name as wide as its `process` header; `from` takes the rest
         widths: columns(
             [
@@ -547,20 +615,19 @@ fn branch(depth: usize, name: &str) -> String {
     format!("{}└ {name}", "  ".repeat(depth + 1))
 }
 
-/// Only ports of agents and orphans unless `all`. A port bound beyond
+/// `shown` of `total` ports, see [`Nav::ports`]. A port bound beyond
 /// loopback gets a `*`, which warns when an agent or orphan owns it.
 /// `width` is the whole box. `compact`, the ports fold into its bottom
 /// border, see [`draw_footer`].
 fn ports_section(
-    ports: &[Listener],
-    all: bool,
+    shown: &[&Listener],
+    total: usize,
     width: u16,
     compact: bool,
     theme: &Theme,
 ) -> Section {
     // process and agent split the rest 1:2; the floor never overshoots
     let agent_max = usize::from(width.saturating_sub(PORTS_FIXED)) * 2 / 3;
-    let shown: Vec<&Listener> = ports.iter().filter(|p| all || p.owner.is_some()).collect();
     // `:3000*`
     let port = |p: &Listener| {
         let star = match (p.public, p.owner.is_some()) {
@@ -602,9 +669,9 @@ fn ports_section(
     };
     Section {
         name: "ports",
-        pane: cursor::PORTS,
+        pane: PORTS,
         count: shown.len(),
-        total: (shown.len() < ports.len()).then_some(ports.len()),
+        total: (shown.len() < total).then_some(total),
         count_style: theme.dim,
         header: Row::new([
             Cell::from("port"),
@@ -613,13 +680,6 @@ fn ports_section(
             Cell::from("agent"),
         ]),
         rows,
-        keys: shown
-            .iter()
-            .map(|p| Key::Port {
-                port: p.port,
-                pid: p.pid(),
-            })
-            .collect(),
         widths: vec![
             Constraint::Length(PORT_WIDTH),
             PID,
@@ -630,25 +690,27 @@ fn ports_section(
     }
 }
 
-/// Stacks sections top to bottom. Every section keeps its title. The
-/// focused section first gets a line for its cursor, then data rows go to
-/// the earlier sections first. Rows nobody needs are shared out so the
-/// boxes fill the area.
+/// Stacks sections of `rows` rows top to bottom. Every section keeps its
+/// title. A section that `shows` its cursor first gets a line for it, then
+/// data rows go to the earlier sections first. Rows nobody needs are shared
+/// out so the boxes fill the area.
 ///
 /// Each section is a box, and a header shows over at least one row or in
-/// an empty section. `compact`, the sections share one box split by `├ name ─┤`
-/// lines and drop their headers, and a last section with
-/// [`Section::inline`] entries folds into the bottom border.
+/// an empty section. `compact`, the sections share one box split by
+/// `├ name ─┤` lines and drop their headers. `footer`, the last section
+/// folds into the bottom border of a compact box.
 fn stack<const N: usize>(
-    frame: &mut Frame,
-    sections: [Section; N],
+    mut rows: [usize; N],
+    shows: [bool; N],
     area: Rect,
     compact: bool,
-    theme: &Theme,
-    focus: &mut Focus,
-) {
-    let footer = sections[N - 1].inline.is_some();
+    footer: bool,
+) -> [Slot; N] {
     debug_assert!(compact || !footer, "only a compact box folds a footer");
+    if footer {
+        // its entries go in the border, not in rows
+        rows[N - 1] = 0;
+    }
     let header = u16::from(!compact);
     let mut left = area.height;
     let mut heights = [0; N];
@@ -663,12 +725,11 @@ fn stack<const N: usize>(
         *h = chrome.min(left);
         left -= *h;
     }
-    let rows = sections.each_ref().map(|s| s.rows.len());
     // header and data lines; a section given one line shows a row without
-    // its header, see `draw_section`
+    // its header
     let mut lines = [0; N];
-    for ((l, section), &n) in lines.iter_mut().zip(&sections).zip(&rows) {
-        if focus.shows(section.pane) && n > 0 {
+    for ((l, &shows), &n) in lines.iter_mut().zip(&shows).zip(&rows) {
+        if shows && n > 0 {
             *l = left.min(1 + header);
             left -= *l;
         }
@@ -692,41 +753,50 @@ fn stack<const N: usize>(
         }
     }
     let areas: [Rect; N] = Layout::vertical(heights.map(Constraint::Length)).areas(area);
-    for (i, (mut section, area)) in sections.into_iter().zip(areas).enumerate() {
-        let block = if !compact {
-            Block::bordered().border_type(BorderType::Rounded)
-        } else if i == N - 1
-            && let Some(entries) = section.inline.take()
-        {
-            draw_footer(frame, section, &entries, area, theme, focus);
-            continue;
+    std::array::from_fn(|i| {
+        let area = areas[i];
+        let (borders, divider) = if !compact {
+            (Borders::ALL, false)
+        } else if i == N - 1 && footer {
+            return Slot::Footer(area);
         } else {
             let bottom = if i == N - 1 {
                 Borders::BOTTOM
             } else {
                 Borders::NONE
             };
-            Block::new()
-                .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT | bottom)
-                .border_set(if i == 0 { border::ROUNDED } else { DIVIDER })
+            (
+                Borders::TOP | Borders::LEFT | Borders::RIGHT | bottom,
+                i > 0,
+            )
         };
-        draw_section(frame, section, area, block, !compact, theme, focus);
-    }
+        let inner = block(borders, divider).inner(area).height;
+        // a single line goes to a row, not to a header with nothing under it
+        let header = !compact && (inner >= 2 || rows[i] == 0);
+        Slot::Rows {
+            area,
+            borders,
+            divider,
+            header,
+            lines: inner - u16::from(header),
+        }
+    })
 }
 
-/// `block` with the title and count in its top border and a dim frame. The
-/// rows scroll to keep the cursor in view, and a last `+N more` line counts
-/// the rows below. The focused section's name takes the accent.
+/// `block` with the title and count in its top border and a dim frame,
+/// showing the rows of `window`. A last `+N more` line counts the rows
+/// below. When the section `shows` its cursor, its name takes the accent.
+#[allow(clippy::too_many_arguments)]
 fn draw_section(
     frame: &mut Frame,
     section: Section,
     area: Rect,
     block: Block,
     header: bool,
+    shows: bool,
+    window: &Window,
     theme: &Theme,
-    focus: &mut Focus,
 ) {
-    let shows = focus.shows(section.pane);
     let mut title = title(&section, shows, theme);
     title.push(Span::styled(" ", theme.dim));
     let block = block
@@ -734,12 +804,6 @@ fn draw_section(
         .padding(Padding::horizontal(1))
         .title(Line::from(title));
     let inner = block.inner(area);
-    // a single line goes to a row, not to a header with nothing under it
-    let header = header && (inner.height >= 2 || section.keys.is_empty());
-    let lines = inner.height.saturating_sub(u16::from(header));
-    let window = focus
-        .pane(section.pane)
-        .frame(section.keys, usize::from(lines));
     let rows = section
         .rows
         .into_iter()
@@ -768,17 +832,10 @@ fn draw_section(
 }
 
 /// A section folded into the bottom border of a compact box:
-/// `╰ ports: 2 · :3000 node claude/hum  :5432 postgres ──╯`. Entries that do
+/// `╰ ports: 2 · :3000 node claude/hum :5432 postgres ──╯`. Entries that do
 /// not fit are counted as `+N`. `Tab` passes over the section.
-fn draw_footer(
-    frame: &mut Frame,
-    section: Section,
-    entries: &[Line],
-    area: Rect,
-    theme: &Theme,
-    focus: &mut Focus,
-) {
-    focus.pane(section.pane).hide();
+fn draw_footer(frame: &mut Frame, section: Section, area: Rect, theme: &Theme) {
+    let entries = section.inline.as_deref().unwrap_or_default();
     let mut spans = title(&section, false, theme);
     // corners, the closing space and at least one rule
     let width = spans.iter().map(Span::width).sum::<usize>();
@@ -877,39 +934,53 @@ fn help_columns(n: usize) -> Vec<String> {
         .collect()
 }
 
-/// Clamps `scroll` to the lines that do not fit.
-fn draw_help(frame: &mut Frame, scroll: &mut usize) {
-    let area = frame.area();
-    let rows = (area.height as usize).saturating_sub(2).max(1);
-    // text plus border and padding
-    let width = |lines: &[String]| lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) + 4;
-    // enough columns to show every line, fewer when they do not fit across
-    let lines = (1..=HELP.len().div_ceil(rows))
-        .rev()
-        .map(help_columns)
-        .find(|lines| width(lines) <= area.width as usize)
-        .unwrap_or_else(|| help_columns(1));
-    let shown = lines.len().min(rows);
-    *scroll = (*scroll).min(lines.len() - shown);
-    let [area] = Layout::horizontal([Constraint::Length(width(&lines) as u16)])
-        .flex(Flex::Center)
-        .areas(area);
-    let [area] = Layout::vertical([Constraint::Length(shown as u16 + 2)])
-        .flex(Flex::Center)
-        .areas(area);
+/// Where the help shows over a pane.
+struct HelpBox {
+    area: Rect,
+    /// [`HELP`] in as many columns as fit.
+    lines: Vec<String>,
+    /// Lines that fit at once.
+    shown: usize,
+}
+
+impl HelpBox {
+    fn new(pane: Rect) -> Self {
+        let rows = (pane.height as usize).saturating_sub(2).max(1);
+        // text plus border and padding
+        let width =
+            |lines: &[String]| lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) + 4;
+        // enough columns to show every line, fewer when they do not fit across
+        let lines = (1..=HELP.len().div_ceil(rows))
+            .rev()
+            .map(help_columns)
+            .find(|lines| width(lines) <= pane.width as usize)
+            .unwrap_or_else(|| help_columns(1));
+        let shown = lines.len().min(rows);
+        let [area] = Layout::horizontal([Constraint::Length(width(&lines) as u16)])
+            .flex(Flex::Center)
+            .areas(pane);
+        let [area] = Layout::vertical([Constraint::Length(shown as u16 + 2)])
+            .flex(Flex::Center)
+            .areas(area);
+        Self { area, lines, shown }
+    }
+}
+
+/// The help scrolled down `scroll` lines, at most to its last.
+fn draw_help(frame: &mut Frame, help: HelpBox, scroll: usize) {
     let mut block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .title(if *scroll > 0 { " help ↑ " } else { " help " })
+        .title(if scroll > 0 { " help ↑ " } else { " help " })
         .padding(Padding::horizontal(1));
-    if *scroll + shown < lines.len() {
+    if scroll + help.shown < help.lines.len() {
         block = block.title_bottom(" ↓ ");
     }
-    frame.render_widget(Clear, area);
+    frame.render_widget(Clear, help.area);
     frame.render_widget(
-        Paragraph::new(lines.into_iter().map(Line::from).collect::<Vec<_>>())
+        Paragraph::new(help.lines.into_iter().map(Line::from).collect::<Vec<_>>())
             .block(block)
-            .scroll((*scroll as u16, 0)),
-        area,
+            .scroll((scroll as u16, 0)),
+        help.area,
     );
 }
 
@@ -993,6 +1064,7 @@ mod tests {
     use crate::claude::Subagent;
     use crate::host::MemHost;
     use crate::label::Label;
+    use crate::nav::Intent;
     use crate::ports::Holder;
 
     const GIB: u64 = 1024 * 1024 * 1024;
@@ -1034,10 +1106,16 @@ mod tests {
     }
 
     /// Draws with every tree expanded.
-    fn draw((width, height): (u16, u16), procs: Vec<(Pid, ProcInfo)>, theme: Theme) -> Buffer {
+    fn draw(size: (u16, u16), procs: Vec<(Pid, ProcInfo)>, theme: Theme) -> Buffer {
         let mut view = View { theme, ..view() };
-        view.outline.expand_all(&scan(&procs));
-        draw_view((width, height), procs, &mut view)
+        expand_all(&mut view, &procs);
+        draw_view(size, procs, &mut view)
+    }
+
+    /// Takes in `procs` and expands every tree, before the first draw.
+    fn expand_all(view: &mut View, procs: &[(Pid, ProcInfo)]) {
+        view.load(snapshot(scan(procs), eight_cores()));
+        view.press(Intent::ExpandAll);
     }
 
     fn scan(procs: &[(Pid, ProcInfo)]) -> Vec<Agent> {
@@ -1100,23 +1178,10 @@ mod tests {
 
     /// Draws every port in `ports` with no agents or orphans.
     fn draw_ports(size: (u16, u16), ports: Vec<Listener>) -> Vec<String> {
-        let snapshot = Snapshot {
-            gauges: gauges(eight_cores()),
-            agents: Vec::new(),
-            orphans: Vec::new(),
-            ports,
-        };
-        let mut terminal = Terminal::new(TestBackend::new(size.0, size.1)).unwrap();
-        terminal
-            .draw(|f| {
-                let mut view = View {
-                    all_ports: true,
-                    ..view()
-                };
-                super::draw(f, &snapshot, &mut view)
-            })
-            .unwrap();
-        text(terminal.backend().buffer())
+        let mut view = view();
+        view.press(Intent::AllPorts);
+        view.load(Snapshot { ports, ..empty() });
+        text(&render(size, &mut view))
     }
 
     fn draw_cores_view(
@@ -1135,23 +1200,37 @@ mod tests {
     }
 
     fn draw_agents(
-        (width, height): (u16, u16),
+        size: (u16, u16),
         agents: Vec<Agent>,
         cores: Vec<f64>,
         view: &mut View,
     ) -> Buffer {
-        let orphans = vec![Orphan {
-            pid: Pid::from_u32(9120),
-            name: "node".into(),
-            from: claude("hum", None),
-            start: 0,
-            cpu: 0.0,
-            mem: 48 << 20,
-        }];
-        let snapshot = Snapshot {
+        view.load(snapshot(agents, cores));
+        render(size, view)
+    }
+
+    /// Draws the snapshot `view` holds, as `run` does.
+    fn render((width, height): (u16, u16), view: &mut View) -> Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|f| crate::render(f, &view.snapshot, &mut view.nav, &view.theme))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    /// The mockup's gauges, orphan and ports with `agents`.
+    fn snapshot(agents: Vec<Agent>, cores: Vec<f64>) -> Snapshot {
+        Snapshot {
             gauges: gauges(cores),
             agents,
-            orphans,
+            orphans: vec![Orphan {
+                pid: Pid::from_u32(9120),
+                name: "node".into(),
+                from: claude("hum", None),
+                start: 0,
+                cpu: 0.0,
+                mem: 48 << 20,
+            }],
             ports: vec![
                 Listener {
                     public: true,
@@ -1160,10 +1239,44 @@ mod tests {
                 port(5432, 1342, "postgres", None),
                 port(8000, 5871, "python", agent_owner("infra", None)),
             ],
-        };
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|f| super::draw(f, &snapshot, view)).unwrap();
-        terminal.backend().buffer().clone()
+        }
+    }
+
+    fn empty() -> Snapshot {
+        Snapshot {
+            gauges: gauges(eight_cores()),
+            agents: Vec::new(),
+            orphans: Vec::new(),
+            ports: Vec::new(),
+        }
+    }
+
+    /// What `run` carries from frame to frame.
+    struct View {
+        nav: Nav,
+        theme: Theme,
+        /// The snapshot drawn last, which keys act on.
+        snapshot: Snapshot,
+    }
+
+    impl View {
+        fn press(&mut self, intent: Intent) {
+            self.nav.handle(intent, &self.snapshot);
+        }
+
+        /// Takes in `snapshot` as a refresh does.
+        fn load(&mut self, snapshot: Snapshot) {
+            self.snapshot = snapshot;
+            self.nav.observe(&self.snapshot);
+        }
+    }
+
+    fn view() -> View {
+        View {
+            nav: Nav::default(),
+            theme: Theme::ayu_mirage(),
+            snapshot: empty(),
+        }
     }
 
     fn text(buf: &Buffer) -> Vec<String> {
@@ -1329,40 +1442,9 @@ mod tests {
     }
 
     #[test]
-    fn inline_ports_take_no_cursor() {
-        let mut view = view();
-        draw_view((74, 9), mockup(), &mut view);
-        view.focus.cycle(1);
-        view.focus.cycle(1);
-        // orphans, then back to agents past the folded ports
-        view.focus.cycle(1);
-        let buf = draw_view((74, 9), mockup(), &mut view);
-        assert!(selected_line(&buf, &view.theme).unwrap().contains("4123"));
-    }
-
-    #[test]
-    fn folded_ports_keep_their_cursor() {
-        let mut view = view();
-        draw_view((74, 16), mockup(), &mut view);
-        view.focus.cycle(1);
-        view.focus.cycle(-1);
-        view.focus.step(1);
-        let buf = draw_view((74, 16), mockup(), &mut view);
-        assert!(selected_line(&buf, &view.theme).unwrap().contains(":8000"));
-        // folded, focus moves on to agents
-        draw_view((74, 9), mockup(), &mut view);
-        draw_view((74, 16), mockup(), &mut view);
-        view.focus.cycle(-1);
-        let buf = draw_view((74, 16), mockup(), &mut view);
-        assert!(selected_line(&buf, &view.theme).unwrap().contains(":8000"));
-    }
-
-    #[test]
     fn a_shows_ports_without_an_agent() {
-        let mut view = View {
-            all_ports: true,
-            ..view()
-        };
+        let mut view = view();
+        view.press(Intent::AllPorts);
         let buf = draw_view((74, 20), mockup(), &mut view);
         let lines = text(&buf);
         assert!(
@@ -1401,7 +1483,7 @@ mod tests {
             owner: None,
         }];
         let theme = Theme::ayu_mirage();
-        let inline = ports_section(&ports, true, 74, true, &theme)
+        let inline = ports_section(&[&ports[0]], 1, 74, true, &theme)
             .inline
             .unwrap();
         assert_eq!(inline[0].spans[1].content, "*");
@@ -1442,7 +1524,8 @@ mod tests {
             public: true,
             ..port(3000, 9120, "node", agent_owner("hum", None))
         }];
-        let section = ports_section(&ports, false, 74, false, &Theme::ayu_mirage());
+        let shown = Nav::default().ports(&ports);
+        let section = ports_section(&shown, ports.len(), 74, false, &Theme::ayu_mirage());
         assert_eq!((section.count, section.total), (1, None));
     }
 
@@ -1473,6 +1556,19 @@ mod tests {
             "{lines:#?}"
         );
         assert!(lines[8].contains("╯╰ ports: 2/3 · :3000* "), "{lines:#?}");
+    }
+
+    #[test]
+    fn compact_panes_give_folded_ports_no_lines() {
+        let mut view = view();
+        view.load(snapshot(scan(&mockup()), eight_cores()));
+        for (size, ports) in [((74, 9), None), ((92, 9), None), ((74, 16), Some(1))] {
+            let area = Rect::new(0, 0, size.0, size.1);
+            let lines = plan(area, &view.snapshot, &view.nav).lines();
+            assert_eq!(lines.sections[PORTS], ports, "{size:?}");
+        }
+        let lines = plan(Rect::new(0, 0, 30, 9), &view.snapshot, &view.nav).lines();
+        assert_eq!(lines.sections, [None; SECTIONS]);
     }
 
     #[test]
@@ -1657,12 +1753,12 @@ mod tests {
     fn cursor_reaches_the_last_of_30_agent_rows_in_74x9() {
         let theme = Theme::ayu_mirage();
         let mut view = View { theme, ..view() };
-        view.outline.expand_all(&scan(&big_tree(29)));
+        expand_all(&mut view, &big_tree(29));
         draw_view((74, 9), big_tree(29), &mut view);
-        view.focus.step(1);
+        view.press(Intent::Down);
         for _ in 0..29 {
             draw_view((74, 9), big_tree(29), &mut view);
-            view.focus.step(1);
+            view.press(Intent::Down);
         }
         let buf = draw_view((74, 9), big_tree(29), &mut view);
         let line = selected_line(&buf, &theme).unwrap();
@@ -1674,10 +1770,10 @@ mod tests {
     fn focused_section_keeps_a_line_for_its_cursor() {
         let theme = Theme::ayu_mirage();
         let mut view = View { theme, ..view() };
-        view.outline.expand_all(&scan(&big_tree(29)));
+        expand_all(&mut view, &big_tree(29));
         draw_view((74, 9), big_tree(29), &mut view);
-        view.focus.cycle(1);
-        view.focus.cycle(1);
+        view.press(Intent::Next);
+        view.press(Intent::Next);
         let buf = draw_view((74, 9), big_tree(29), &mut view);
         assert!(selected_line(&buf, &theme).unwrap().contains("9120"));
     }
@@ -1687,10 +1783,10 @@ mod tests {
         let theme = Theme::ayu_mirage();
         for height in [8, 10] {
             let mut view = View { theme, ..view() };
-            view.outline.expand_all(&scan(&big_tree(29)));
+            expand_all(&mut view, &big_tree(29));
             draw_view((74, height), big_tree(29), &mut view);
-            view.focus.cycle(1);
-            view.focus.cycle(1);
+            view.press(Intent::Next);
+            view.press(Intent::Next);
             let buf = draw_view((74, height), big_tree(29), &mut view);
             let lines = text(&buf);
             assert!(
@@ -1706,37 +1802,21 @@ mod tests {
     }
 
     #[test]
-    fn cursor_stays_on_its_process_when_rows_reorder() {
-        let theme = Theme::ayu_mirage();
-        let mut view = View { theme, ..view() };
-        draw_view((74, 16), mockup(), &mut view);
-        view.focus.step(1);
-        view.focus.step(1);
-        let buf = draw_view((74, 16), mockup(), &mut view);
-        assert!(selected_line(&buf, &theme).unwrap().contains("5871"));
-        // the session above exits and 5871 moves up a row
-        let mut procs = mockup();
-        procs.remove(0);
-        let buf = draw_view((74, 16), procs, &mut view);
-        assert!(selected_line(&buf, &theme).unwrap().contains("5871"));
-    }
-
-    #[test]
     fn tab_moves_the_cursor_to_orphans_and_leaves_agents() {
         let theme = Theme::ayu_mirage();
         let mut view = View { theme, ..view() };
         draw_view((74, 16), mockup(), &mut view);
         // the first Tab shows the cursor in agents
-        view.focus.cycle(1);
+        view.press(Intent::Next);
         let buf = draw_view((74, 16), mockup(), &mut view);
         assert!(selected_line(&buf, &theme).unwrap().contains("4123"));
-        view.focus.cycle(1);
-        view.focus.step(1);
+        view.press(Intent::Next);
+        view.press(Intent::Down);
         let buf = draw_view((74, 16), mockup(), &mut view);
         assert!(selected_line(&buf, &theme).unwrap().contains("9120"));
         assert_eq!(fg_at(&buf, "orphans: 1", 1), fg(theme.accent));
         assert_eq!(fg_at(&buf, "agents: 3", 0), fg(theme.dim));
-        view.focus.cycle(-1);
+        view.press(Intent::Prev);
         let buf = draw_view((74, 16), mockup(), &mut view);
         assert!(selected_line(&buf, &theme).unwrap().contains("4123"));
     }
@@ -1774,9 +1854,13 @@ mod tests {
         let buf = draw_agents((74, 16), with_subagents(), eight_cores(), &mut view);
         let lines = text(&buf);
         assert!(lines[4].starts_with("│ ▸ ● claude (4) "), "{lines:#?}");
-        let agents = with_subagents();
-        view.outline.expand_all(&agents);
-        let lines = text(&draw_agents((74, 16), agents, eight_cores(), &mut view));
+        view.press(Intent::ExpandAll);
+        let lines = text(&draw_agents(
+            (74, 16),
+            with_subagents(),
+            eight_cores(),
+            &mut view,
+        ));
         assert!(lines[5].starts_with("│     └ ◇ Explore  "), "{lines:#?}");
         assert!(
             lines[6].starts_with("│     └ ◇ code-review  "),
@@ -1792,10 +1876,15 @@ mod tests {
 
     #[test]
     fn subagents_fit_the_glance_pane() {
-        let agents = with_subagents();
         let mut view = view();
-        view.outline.expand_all(&agents);
-        let lines = text(&draw_agents((74, 10), agents, eight_cores(), &mut view));
+        view.load(snapshot(with_subagents(), eight_cores()));
+        view.press(Intent::ExpandAll);
+        let lines = text(&draw_agents(
+            (74, 10),
+            with_subagents(),
+            eight_cores(),
+            &mut view,
+        ));
         // the processes branch from the session beside the subagents
         let rows = [
             "│     └ ◇ Explore ",
@@ -1812,17 +1901,17 @@ mod tests {
 
     #[test]
     fn a_session_with_only_subagents_expands() {
-        let mut agents = scan(&mockup());
-        agents[0].subagents = with_subagents().remove(0).subagents;
+        let agents = || {
+            let mut agents = scan(&mockup());
+            agents[0].subagents = with_subagents().remove(0).subagents;
+            agents
+        };
         let mut view = view();
-        view.outline.expand_all(&agents);
-        let lines = text(&draw_agents((74, 16), agents, eight_cores(), &mut view));
+        view.load(snapshot(agents(), eight_cores()));
+        view.press(Intent::ExpandAll);
+        let lines = text(&draw_agents((74, 16), agents(), eight_cores(), &mut view));
         assert!(lines[4].starts_with("│ ▾ ● claude "), "{lines:#?}");
         assert!(lines[5].starts_with("│     └ ◇ Explore "), "{lines:#?}");
-    }
-
-    fn view() -> View {
-        View::new(Theme::ayu_mirage())
     }
 
     fn shows(buf: &Buffer, pid: &str) -> bool {
@@ -1831,10 +1920,8 @@ mod tests {
 
     #[test]
     fn help_fits_a_short_pane_in_two_columns() {
-        let mut view = View {
-            help: Some(0),
-            ..view()
-        };
+        let mut view = view();
+        view.press(Intent::Help);
         // too short for one column: two, with every line shown
         for (size, two) in [
             ((74, 10), true),
@@ -1863,10 +1950,8 @@ mod tests {
 
     #[test]
     fn help_takes_more_columns_in_a_wide_short_pane() {
-        let mut view = View {
-            help: Some(0),
-            ..view()
-        };
+        let mut view = view();
+        view.press(Intent::Help);
         // 4 rows need 4 columns, 134 wide; 5 rows fit in 3
         for size in [(134, 6), (120, 7)] {
             let lines = text(&draw_view(size, mockup(), &mut view));
@@ -1882,10 +1967,8 @@ mod tests {
 
     #[test]
     fn help_scrolls_when_too_short_and_narrow() {
-        let mut view = View {
-            help: Some(0),
-            ..view()
-        };
+        let mut view = view();
+        view.press(Intent::Help);
         let last = HELP[HELP.len() - 1];
         // two columns of 7 rows in 6: the last row is below
         let lines = text(&draw_view((74, 8), mockup(), &mut view));
@@ -1894,9 +1977,11 @@ mod tests {
             lines[7].contains("╰ ↓ ") && !lines[0].contains('↑'),
             "{lines:#?}"
         );
-        view.help = Some(99);
+        for _ in 0..99 {
+            view.press(Intent::Down);
+        }
         let lines = text(&draw_view((74, 8), mockup(), &mut view));
-        assert_eq!(view.help, Some(1));
+        assert_eq!(view.nav.help(), Some(1));
         assert!(lines.iter().any(|l| l.contains(last)), "{lines:#?}");
         assert!(
             lines[0].contains(" help ↑ ") && !lines[7].contains('↓'),
@@ -1904,7 +1989,7 @@ mod tests {
         );
         // a pane with room shows it all, back at the top
         let lines = text(&draw_view((74, 16), mockup(), &mut view));
-        assert_eq!(view.help, Some(0));
+        assert_eq!(view.nav.help(), Some(0));
         assert!(lines.iter().any(|l| l.contains(HELP[0])), "{lines:#?}");
     }
 
@@ -1920,38 +2005,13 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_a_child_collapses_its_tree_under_the_cursor() {
-        let mut view = view();
-        let agents = scan(&sessions());
-        view.outline.expand_all(&agents);
-        draw_view((74, 16), sessions(), &mut view);
-        view.focus.step(1);
-        view.focus.step(2);
-        let buf = draw_view((74, 16), sessions(), &mut view);
-        assert!(selected_line(&buf, &view.theme).unwrap().contains("4125"));
-        view.fold(&agents, Fold::Toggle);
-        let buf = draw_view((74, 16), sessions(), &mut view);
-        assert!(selected_line(&buf, &view.theme).unwrap().contains("4123"));
-        assert!(!shows(&buf, "4125"));
-        // so does collapsing every tree, on the next draw
-        view.outline.expand_all(&agents);
-        view.focus.jump(usize::MAX);
-        draw_view((74, 16), sessions(), &mut view);
-        view.focus.step(-1);
-        draw_view((74, 16), sessions(), &mut view);
-        view.outline.collapse_all();
-        let buf = draw_view((74, 16), sessions(), &mut view);
-        assert!(selected_line(&buf, &view.theme).unwrap().contains("5871"));
-    }
-
-    #[test]
     fn no_color_reverses_the_selected_row() {
         let mut view = View {
             theme: Theme::no_color(),
             ..view()
         };
         draw_view((74, 16), mockup(), &mut view);
-        view.focus.step(1);
+        view.press(Intent::Down);
         let buf = draw_view((74, 16), mockup(), &mut view);
         let y = text(&buf).iter().position(|l| l.contains("4123")).unwrap();
         // the tint spans the row, numbers and gaps alike
@@ -1963,10 +2023,9 @@ mod tests {
     }
 
     fn cores_on() -> View {
-        View {
-            cores: true,
-            ..view()
-        }
+        let mut view = view();
+        view.press(Intent::Cores);
+        view
     }
 
     fn draw_cores_lines(size: (u16, u16), cores: Vec<f64>) -> Vec<String> {

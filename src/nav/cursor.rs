@@ -4,7 +4,7 @@ use super::Key;
 pub const AGENTS: usize = 0;
 pub const ORPHANS: usize = 1;
 pub const PORTS: usize = 2;
-const SECTIONS: usize = 3;
+pub const SECTIONS: usize = 3;
 
 /// One section's cursor and scroll position.
 #[derive(Default)]
@@ -20,8 +20,8 @@ pub struct Pane {
     page: usize,
 }
 
-/// The rows of a section one frame shows.
-#[derive(Debug, PartialEq)]
+/// The rows of a section one frame shows; none for a hidden section.
+#[derive(Debug, Default, PartialEq)]
 pub struct Window {
     /// The first row shown, as an index into the section's rows.
     pub offset: usize,
