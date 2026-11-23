@@ -3,6 +3,7 @@ mod claude;
 mod cli;
 mod focus;
 mod label;
+mod meminfo;
 mod outline;
 mod ports;
 mod theme;
@@ -101,7 +102,7 @@ impl Gauges {
                 .map(|c| f64::from(c.usage()) / 100.0)
                 .collect(),
             mem: (sys.used_memory(), sys.total_memory()),
-            swap: (sys.used_swap(), sys.total_swap()),
+            swap: meminfo::read_swap().unwrap_or((sys.used_swap(), sys.total_swap())),
         }
     }
 }
