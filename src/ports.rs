@@ -53,14 +53,19 @@ pub struct Ports<H = ProcHost> {
     host: H,
     /// When the socket tables were last read; None before the first read.
     read_at: Option<Instant>,
+    /// Half a tick. Refreshes jitter by a few ms, so at an interval that
+    /// divides [`PORT_REREAD`] a reread due on a tick would otherwise slip
+    /// to the next one.
+    slack: Duration,
     last: Vec<Listener>,
 }
 
 impl<H: Host> Ports<H> {
-    pub fn new(host: H) -> Self {
+    pub fn new(host: H, tick: Duration) -> Self {
         Self {
             host,
             read_at: None,
+            slack: tick / 2,
             last: Vec::new(),
         }
     }
@@ -76,7 +81,7 @@ impl<H: Host> Ports<H> {
     ) -> Vec<Listener> {
         if self
             .read_at
-            .is_none_or(|at| now.saturating_duration_since(at) >= PORT_REREAD)
+            .is_none_or(|at| now.saturating_duration_since(at) + self.slack >= PORT_REREAD)
         {
             self.last = listening(&self.host, procs);
             self.read_at = Some(now);
@@ -349,8 +354,8 @@ mod tests {
         fake.hold(1, &[12, 11, 10]);
         // unrelated holders of one socket, e.g. one passed over a unix socket
         fake.hold(2, &[21, 20]);
-        let mut ports = Ports::new(fake);
-        // a fresh map each read, so its hash order varies
+        let mut ports = Ports::new(fake, Duration::from_secs(1));
+        // a fresh map each tick, so its hash order varies; rereads and joins
         for n in 0..40 {
             let procs = HashMap::from([
                 proc(12, 10, 102, "nginx"),
@@ -359,7 +364,7 @@ mod tests {
                 proc(21, 1, 201, "worker"),
                 proc(20, 1, 200, "worker"),
             ]);
-            let got = ports.observe(&procs, after(n * 5000), &[], &[]);
+            let got = ports.observe(&procs, after(n * 1000), &[], &[]);
             assert_eq!(
                 rows(&got),
                 [(80, Some(10), "nginx"), (9000, Some(20), "worker")]
@@ -375,7 +380,7 @@ mod tests {
         };
         fake.hold(1, &[10]);
         fake.hold(2, &[20]);
-        let mut ports = Ports::new(fake);
+        let mut ports = Ports::new(fake, Duration::from_secs(1));
         let procs = HashMap::from([proc(10, 1, 100, "npm"), proc(20, 1, 200, "vite")]);
         assert_eq!(
             rows(&ports.observe(&procs, after(0), &[], &[])),
@@ -406,7 +411,7 @@ mod tests {
             ..MemHost::default()
         };
         fake.hold(1, &[30]);
-        let mut ports = Ports::new(fake);
+        let mut ports = Ports::new(fake, Duration::from_secs(1));
         let procs = HashMap::from([proc(40, 1, 400, "claude"), proc(30, 40, 401, "python3")]);
         let agents = agents::scan(&procs, None, &[], None, &MemHost::default());
         let owners = |got: &[Listener]| -> Vec<Option<(&str, bool)>> {
@@ -443,7 +448,7 @@ mod tests {
 
     #[test]
     fn reread_follows_elapsed_time_not_refresh_count() {
-        let mut ports = Ports::new(MemHost::default());
+        let mut ports = Ports::new(MemHost::default(), Duration::from_millis(200));
         let procs = HashMap::from([proc(10, 1, 100, "python3")]);
         let ports_at = |ports: &mut Ports<MemHost>, ms| ports.observe(&procs, after(ms), &[], &[]);
         assert!(ports_at(&mut ports, 0).is_empty());
@@ -461,6 +466,18 @@ mod tests {
         // a 10s interval rereads on every refresh
         ports.host.listen.clear();
         assert!(ports_at(&mut ports, 15000).is_empty());
+    }
+
+    #[test]
+    fn reread_due_on_a_tick_survives_jitter() {
+        let mut ports = Ports::new(MemHost::default(), Duration::from_secs(5));
+        let procs = HashMap::from([proc(10, 1, 100, "python3")]);
+        ports.observe(&procs, after(40), &[], &[]);
+        ports.host.listen.push((8123, 1));
+        ports.host.hold(1, &[10]);
+        // the first refresh's sysinfo pass ran 5ms longer than this one's
+        let got = ports.observe(&procs, after(5035), &[], &[]);
+        assert_eq!(rows(&got), [(8123, Some(10), "python3")]);
     }
 
     #[test]
