@@ -163,15 +163,10 @@ mod mem {
     }
 
     impl MemHost {
-        /// Sets `pid`'s cpu to `ticks`, with start time 0.
+        /// Sets `pid`'s cpu to `ticks`, keeping its start time, else 0.
         pub fn cpu(&mut self, pid: u32, ticks: u64) {
-            self.stats.insert(
-                Pid::from_u32(pid),
-                Stat {
-                    start: 0,
-                    cpu: ticks,
-                },
-            );
+            let stat = Stat { start: 0, cpu: 0 };
+            self.stats.entry(Pid::from_u32(pid)).or_insert(stat).cpu = ticks;
         }
 
         /// Writes `text` to `path`, created and modified at `at`.

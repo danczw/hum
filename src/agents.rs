@@ -1755,7 +1755,7 @@ mod tests {
         assert!(agents[0].busy());
 
         // the tree ran 50 ticks in a second
-        sessions.host.stats.get_mut(&Pid::from_u32(10)).unwrap().cpu += 30;
+        sessions.host.cpu(10, 1030);
         sessions.host.cpu(11, 520);
         let agents = tick(&mut sessions, &procs, 1, 1);
         assert_eq!(cores(agents[0].cpu), 0.5);
