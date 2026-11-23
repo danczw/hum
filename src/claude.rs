@@ -100,12 +100,16 @@ fn same_process(file: &str, stat: impl FnOnce() -> Option<String>) -> bool {
         Some(Field::Str(v) | Field::Raw(v)) => v.trim().parse::<u64>(),
     };
     let Ok(start) = start else { return false };
-    // starttime is field 22; fields 3 on follow the `)` that ends the comm
-    stat().is_some_and(|stat| {
-        stat.rsplit_once(')')
-            .and_then(|(_, rest)| rest.split_whitespace().nth(19))
-            .is_some_and(|ticks| ticks.parse() == Ok(start))
-    })
+    // starttime is field 22
+    stat().is_some_and(|stat| stat_field(&stat, 22).is_some_and(|t| t.parse() == Ok(start)))
+}
+
+/// Field `n` of a `/proc/<pid>/stat` line, numbered from 1 as in proc(5).
+/// The comm in field 2 may hold spaces and `)`, so fields 3 on are counted
+/// from the last `)`.
+pub fn stat_field(stat: &str, n: usize) -> Option<&str> {
+    let (_, rest) = stat.rsplit_once(')')?;
+    rest.split_whitespace().nth(n.checked_sub(3)?)
 }
 
 /// Subagents still running in session `session` at `cwd`, oldest first.
