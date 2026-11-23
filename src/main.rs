@@ -45,7 +45,7 @@ impl App {
             sys: System::new().map_err(io::Error::other)?,
             host: ProcHost,
             sessions: Sessions::new(home, claude, agents, tick, ProcHost),
-            ports: Ports::new(ProcHost),
+            ports: Ports::new(ProcHost, tick),
             tick,
         })
     }
