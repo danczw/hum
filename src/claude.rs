@@ -1,5 +1,4 @@
 use std::ffi::OsString;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -86,7 +85,7 @@ pub fn config(config_dir: Option<OsString>, home: Option<&Path>) -> Option<PathB
 /// None when the file is from an earlier process on the same pid, see
 /// [`same_process`].
 pub fn read_session(config: &Path, pid: Pid, host: &impl Host) -> Option<SessionFile> {
-    let file = fs::read_to_string(config.join("sessions").join(format!("{pid}.json"))).ok()?;
+    let file = host.read(&config.join("sessions").join(format!("{pid}.json")))?;
     same_process(&file, pid, host).then(|| SessionFile::parse(&file))
 }
 
@@ -115,6 +114,7 @@ pub fn running_subagents(
     cwd: Option<&Path>,
     session: &SessionId,
     now: SystemTime,
+    host: &impl Host,
 ) -> Vec<Subagent> {
     let projects = config.join("projects");
     let in_project = |p: &Path| p.join(&session.0).join("subagents");
@@ -124,46 +124,44 @@ pub fn running_subagents(
     // the subagents dir appears with the first subagent, so only a missing
     // project dir means the name missed
     let Some(dir) = named
-        .filter(|p| p.is_dir())
+        .filter(|p| host.is_dir(p))
         .map(|p| in_project(&p))
         .or_else(|| {
-            fs::read_dir(&projects)
-                .ok()?
-                .filter_map(Result::ok)
-                .map(|p| in_project(&p.path()))
-                .find(|d| d.is_dir())
+            host.list(&projects)?
+                .into_iter()
+                .map(|p| in_project(&p))
+                .find(|d| host.is_dir(d))
         })
     else {
         return Vec::new();
     };
-    let Ok(entries) = fs::read_dir(&dir) else {
+    let Some(entries) = host.list(&dir) else {
         return Vec::new();
     };
     let quiet_since = now
         .checked_sub(SUBAGENT_QUIET)
         .unwrap_or(SystemTime::UNIX_EPOCH);
     let mut found: Vec<(SystemTime, Subagent)> = entries
-        .filter_map(Result::ok)
-        .filter_map(|e| {
-            let name = e.file_name();
-            let id = name
+        .into_iter()
+        .filter_map(|path| {
+            let id = path
+                .file_name()?
                 .to_str()?
                 .strip_prefix("agent-")?
                 .strip_suffix(".meta.json")?;
-            let meta = e.metadata().ok()?;
+            let meta = host.times(&path)?;
             // checked before the meta is read, so subagents that ended long
             // ago cost two stats each; a transcript not yet created counts as
             // written with the meta
-            let written = fs::metadata(dir.join(format!("agent-{id}.jsonl")))
-                .and_then(|t| t.modified())
-                .or_else(|_| meta.modified())
-                .ok()?;
+            let written = host
+                .times(&dir.join(format!("agent-{id}.jsonl")))
+                .map_or(meta.modified, |t| t.modified);
             if written < quiet_since {
                 return None;
             }
             // its mtime moves when the subagent finishes, its birth time not
-            let started = meta.created().or_else(|_| meta.modified()).ok()?;
-            let kind = subagent(&fs::read_to_string(e.path()).ok()?)?;
+            let started = meta.created.unwrap_or(meta.modified);
+            let kind = subagent(&host.read(&path)?)?;
             let id = id.to_string();
             Some((started, Subagent { id, kind }))
         })
@@ -289,46 +287,77 @@ fn skip_json_value(chars: &mut Chars) -> Option<String> {
     }
 }
 
-/// Claude config dirs on disk for tests in other modules, so they need no
+/// Claude config dirs in memory for tests in other modules, so they need no
 /// JSON of their own.
 #[cfg(test)]
 pub mod fixture {
     use super::*;
+    use crate::host::MemHost;
 
-    /// A config dir with session `5e55` in the project of cwd `/x/hum`,
-    /// holding `subagents` as (id, meta, seconds since its transcript was
-    /// written), metas written in order. Returns the dir and now.
-    pub fn subagent_dir(name: &str, subagents: &[(&str, &str, u64)]) -> (PathBuf, SystemTime) {
-        let config = std::env::temp_dir().join(format!("hum-{name}-{}", std::process::id()));
-        let dir = config.join("projects/-x-hum/5e55/subagents");
-        fs::create_dir_all(&dir).unwrap();
-        let now = SystemTime::now();
-        for &(id, meta, quiet) in subagents {
-            // past the kernel's coarse file timestamps, so start times differ
-            std::thread::sleep(Duration::from_millis(20));
-            fs::write(dir.join(format!("agent-{id}.meta.json")), meta).unwrap();
-            let transcript = dir.join(format!("agent-{id}.jsonl"));
-            let file = fs::File::create(&transcript).unwrap();
-            file.set_modified(now - Duration::from_secs(quiet)).unwrap();
-        }
-        (config, now)
+    /// The config dir the fixtures write to.
+    pub const CONFIG: &str = "/c";
+
+    /// A fixed now, so file times need no sleeps between writes.
+    pub fn now() -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000)
     }
 
-    /// [`subagent_dir`] with one running `Explore` subagent, and the file of
-    /// session `5e55` at `/x/hum`, reporting idle, for `pid`.
-    pub fn idle_with_subagent(name: &str, pid: u32) -> (PathBuf, SystemTime) {
-        let (config, now) = subagent_dir(name, &[("a1", r#"{"agentType":"Explore"}"#, 0)]);
-        let sessions = config.join("sessions");
-        fs::create_dir_all(&sessions).unwrap();
-        let file = r#"{"cwd":"/x/hum","sessionId":"5e55","status":"idle"}"#;
-        fs::write(sessions.join(format!("{pid}.json")), file).unwrap();
-        (config, now)
+    /// Writes into `host` session `5e55` in the project of cwd `/x/hum`,
+    /// holding `subagents` as (id, meta, seconds since its transcript was
+    /// written), metas written a second apart in order, the last at
+    /// [`now`].
+    pub fn subagents(host: &mut MemHost, subagents: &[(&str, &str, u64)]) {
+        let dir = Path::new(CONFIG).join("projects/-x-hum/5e55/subagents");
+        for (n, &(id, meta, quiet)) in subagents.iter().enumerate() {
+            let back = Duration::from_secs((subagents.len() - 1 - n) as u64);
+            host.file(
+                dir.join(format!("agent-{id}.meta.json")),
+                meta,
+                now() - back,
+            );
+            let quiet = Duration::from_secs(quiet);
+            host.file(dir.join(format!("agent-{id}.jsonl")), "", now() - quiet);
+        }
+    }
+
+    /// The file of session `5e55` at `/x/hum` for `pid`, with its status
+    /// `busy` or `idle`.
+    pub fn session(host: &mut MemHost, pid: u32, status: &str) {
+        let path = Path::new(CONFIG).join(format!("sessions/{pid}.json"));
+        let file = format!(r#"{{"cwd":"/x/hum","sessionId":"5e55","status":"{status}"}}"#);
+        host.file(path, &file, now());
+    }
+
+    impl SessionFile {
+        /// The file as Claude Code writes it.
+        pub fn json(&self) -> String {
+            let mut fields = Vec::new();
+            if let Some(cwd) = &self.cwd {
+                fields.push(format!(r#""cwd":"{}""#, cwd.display()));
+            }
+            if let Some(busy) = self.busy {
+                let status = if busy { "busy" } else { "idle" };
+                fields.push(format!(r#""status":"{status}""#));
+            }
+            if let Some(id) = &self.id {
+                fields.push(format!(r#""sessionId":"{}""#, id.0));
+            }
+            let name = match &self.name {
+                Some(Name::Given(n)) => Some((n, "user")),
+                Some(Name::Derived(n)) => Some((n, "derived")),
+                None => None,
+            };
+            if let Some((name, source)) = name {
+                fields.push(format!(r#""name":"{name}","nameSource":"{source}""#));
+            }
+            format!("{{{}}}", fields.join(","))
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::fixture::subagent_dir;
+    use super::fixture::{self, CONFIG, now};
     use super::*;
     use crate::host::{MemHost, Stat};
 
@@ -481,8 +510,9 @@ mod tests {
 
     #[test]
     fn running_subagents_in_start_order() {
-        let (config, now) = subagent_dir(
-            "subagents",
+        let mut host = MemHost::default();
+        fixture::subagents(
+            &mut host,
             &[
                 ("a2", r#"{"agentType":"Explore"}"#, 0),
                 ("a1", r#"{"agentType":"Plan"}"#, 650),
@@ -491,24 +521,32 @@ mod tests {
                 ("a0", r#"{"agentType":"Explore"}"#, 670),
             ],
         );
-        let cwd = Some(Path::new("/x/hum"));
-        let found = running_subagents(&config, cwd, &id("5e55"), now);
+        let running = |cwd: &str, session: &str| {
+            let found = running_subagents(
+                Path::new(CONFIG),
+                Some(Path::new(cwd)),
+                &id(session),
+                now(),
+                &host,
+            );
+            kinds(&found)
+                .into_iter()
+                .map(|(id, kind)| format!("{id} {kind}"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(running("/x/hum", "5e55"), ["a2 Explore", "a1 Plan"]);
         // a cwd whose project dir name differs is searched for
-        let searched = running_subagents(&config, Some(Path::new("/y")), &id("5e55"), now);
-        let missing = running_subagents(&config, cwd, &id("beef"), now);
-        fs::remove_dir_all(&config).unwrap();
-        assert_eq!(kinds(&found), [("a2", "Explore"), ("a1", "Plan")]);
-        assert_eq!(kinds(&searched), kinds(&found));
-        assert!(missing.is_empty());
+        assert_eq!(running("/y", "5e55"), running("/x/hum", "5e55"));
+        assert!(running("/x/hum", "beef").is_empty());
     }
 
     #[test]
     fn subagent_without_a_transcript_yet_is_running() {
-        let (config, now) = subagent_dir("fresh", &[]);
-        let dir = config.join("projects/-x-hum/5e55/subagents");
-        fs::write(dir.join("agent-a1.meta.json"), r#"{"agentType":"Explore"}"#).unwrap();
-        let found = running_subagents(&config, Some(Path::new("/x/hum")), &id("5e55"), now);
-        fs::remove_dir_all(&config).unwrap();
+        let mut host = MemHost::default();
+        let meta = Path::new(CONFIG).join("projects/-x-hum/5e55/subagents/agent-a1.meta.json");
+        host.file(meta, r#"{"agentType":"Explore"}"#, now());
+        let cwd = Some(Path::new("/x/hum"));
+        let found = running_subagents(Path::new(CONFIG), cwd, &id("5e55"), now(), &host);
         assert_eq!(kinds(&found), [("a1", "Explore")]);
     }
 
