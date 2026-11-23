@@ -13,17 +13,17 @@ use std::io;
 use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime};
 
-use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use ratatui::{DefaultTerminal, Frame};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 use agents::Sessions;
 use cli::Action;
 use host::{Host, ProcHost};
-use nav::outline::Fold;
+use nav::{Intent, Nav, Outcome};
 use ports::Ports;
 use theme::Theme;
-use ui::{Gauges, Snapshot, View};
+use ui::{Gauges, Snapshot};
 
 /// sysinfo reports cpu as 0 until a second read, which needs this gap.
 const CPU_SETTLE: Duration = Duration::from_millis(200);
@@ -119,17 +119,19 @@ fn main() -> io::Result<ExitCode> {
     // leaked once; agent kinds are &'static str
     let agents = opts.agents.into_iter().map(|a| &*a.leak()).collect();
     let mut app = App::new(opts.interval, agents)?;
-    let mut view = View::new(Theme::from_env());
+    let theme = Theme::from_env();
     let terminal = ratatui::init();
-    let result = run(terminal, &mut app, &mut view);
+    let result = run(terminal, &mut app, &theme);
     ratatui::restore();
     result.map(|()| ExitCode::SUCCESS)
 }
 
-fn run(mut terminal: DefaultTerminal, app: &mut App, view: &mut View) -> io::Result<()> {
+fn run(mut terminal: DefaultTerminal, app: &mut App, theme: &Theme) -> io::Result<()> {
+    let mut nav = Nav::default();
     // stamped before the refresh so its run time does not stretch the period
     let mut last_tick = Instant::now();
     let mut snapshot = app.refresh();
+    nav.observe(&snapshot);
     // the second refresh comes early so cpu shows before a long tick ends
     let mut period = app.tick.min(CPU_SETTLE);
 
@@ -137,6 +139,7 @@ fn run(mut terminal: DefaultTerminal, app: &mut App, view: &mut View) -> io::Res
         if last_tick.elapsed() >= period {
             last_tick = Instant::now();
             snapshot = app.refresh();
+            nav.observe(&snapshot);
             period = app.tick;
             // a refresh slower than the tick restarts it, so hum still idles a full tick
             if last_tick.elapsed() >= period {
@@ -144,47 +147,47 @@ fn run(mut terminal: DefaultTerminal, app: &mut App, view: &mut View) -> io::Res
             }
         }
 
-        terminal.draw(|frame| ui::draw(frame, &snapshot, view))?;
+        terminal.draw(|frame| render(frame, &snapshot, &mut nav, theme))?;
 
         let timeout = period.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)?
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
+            && let Some(intent) = intent(key.code)
+            && nav.handle(intent, &snapshot) == Outcome::Quit
         {
-            // the cursor stays put behind the help
-            if let Some(scroll) = &mut view.help {
-                match key.code {
-                    KeyCode::Char('q') => return Ok(()),
-                    KeyCode::Esc | KeyCode::Char('?') => view.help = None,
-                    KeyCode::Char('j') | KeyCode::Down => *scroll += 1,
-                    KeyCode::Char('k') | KeyCode::Up => *scroll = scroll.saturating_sub(1),
-                    _ => {}
-                }
-                continue;
-            }
-            let focus = &mut view.focus;
-            let agents = &snapshot.agents;
-            match key.code {
-                KeyCode::Esc if focus.clear() => {}
-                KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                KeyCode::Char('?') => view.help = Some(0),
-                KeyCode::Char('j') | KeyCode::Down => focus.step(1),
-                KeyCode::Char('k') | KeyCode::Up => focus.step(-1),
-                KeyCode::Char('g') => focus.jump(0),
-                KeyCode::Char('G') => focus.jump(usize::MAX),
-                KeyCode::PageDown => focus.page(true),
-                KeyCode::PageUp => focus.page(false),
-                KeyCode::Tab => focus.cycle(1),
-                KeyCode::BackTab => focus.cycle(-1),
-                KeyCode::Enter | KeyCode::Char(' ') => view.fold(agents, Fold::Toggle),
-                KeyCode::Char('l') | KeyCode::Right => view.fold(agents, Fold::Expand),
-                KeyCode::Char('h') | KeyCode::Left => view.fold(agents, Fold::Collapse),
-                KeyCode::Char('e') => view.outline.expand_all(agents),
-                KeyCode::Char('c') => view.outline.collapse_all(),
-                KeyCode::Char('1') => view.cores = !view.cores,
-                KeyCode::Char('a') => view.all_ports = !view.all_ports,
-                _ => {}
-            }
+            return Ok(());
         }
     }
+}
+
+/// Lays out the frame, fits the cursors to it, then paints.
+fn render(frame: &mut Frame, snapshot: &Snapshot, nav: &mut Nav, theme: &Theme) {
+    let plan = ui::plan(frame.area(), snapshot, nav);
+    let windows = nav.frame(snapshot, &plan.lines());
+    ui::draw(frame, snapshot, nav, theme, plan, &windows);
+}
+
+fn intent(code: KeyCode) -> Option<Intent> {
+    Some(match code {
+        KeyCode::Esc => Intent::Back,
+        KeyCode::Char('q') => Intent::Quit,
+        KeyCode::Char('?') => Intent::Help,
+        KeyCode::Char('j') | KeyCode::Down => Intent::Down,
+        KeyCode::Char('k') | KeyCode::Up => Intent::Up,
+        KeyCode::Char('g') => Intent::First,
+        KeyCode::Char('G') => Intent::Last,
+        KeyCode::PageDown => Intent::PageDown,
+        KeyCode::PageUp => Intent::PageUp,
+        KeyCode::Tab => Intent::Next,
+        KeyCode::BackTab => Intent::Prev,
+        KeyCode::Enter | KeyCode::Char(' ') => Intent::Toggle,
+        KeyCode::Char('l') | KeyCode::Right => Intent::Expand,
+        KeyCode::Char('h') | KeyCode::Left => Intent::Collapse,
+        KeyCode::Char('e') => Intent::ExpandAll,
+        KeyCode::Char('c') => Intent::CollapseAll,
+        KeyCode::Char('1') => Intent::Cores,
+        KeyCode::Char('a') => Intent::AllPorts,
+        _ => return None,
+    })
 }
