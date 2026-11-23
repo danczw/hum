@@ -458,7 +458,7 @@ impl Orphan {
 
 /// The session a port's process belongs to: `claude/hum`, or
 /// `orphan:claude/hum` when the process outlived it.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Owner {
     pub label: Label,
     pub orphan: bool,
