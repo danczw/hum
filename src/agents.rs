@@ -721,9 +721,9 @@ pub struct TreeCpu {
 
 impl TreeCpu {
     /// Sets each agent's cpu from the change in its tree ticks since the last
-    /// call. A first sight, or a clock that went back, keeps sysinfo's sum.
-    /// A member reaped outside the tree takes its ticks along, which reads 0
-    /// for that tick rather than below.
+    /// whole read. A first sight, a member that can't be read, or a clock
+    /// that went back keeps sysinfo's sum. A member reaped outside the tree
+    /// takes its ticks along, which reads 0 for that tick rather than below.
     pub fn update(
         &mut self,
         agents: &mut [Agent],
@@ -733,8 +733,12 @@ impl TreeCpu {
         let roots: HashSet<Key> = agents.iter().map(Agent::key).collect();
         self.prev.retain(|root, _| roots.contains(root));
         for agent in agents {
-            // a member that exited since the snapshot reads None and is skipped
-            let ticks: u64 = agent.procs.iter().filter_map(|p| read(p.pid)).sum();
+            // Parents come before their children, so a child reaped between
+            // the two reads is in neither; skip such a read and diff the next
+            // one against the last whole read.
+            let Some(ticks) = agent.procs.iter().map(|p| read(p.pid)).sum::<Option<u64>>() else {
+                continue;
+            };
             let prev = self.prev.insert(agent.key(), (ticks, now));
             let Some((before, then)) = prev else { continue };
             let span = now.duration_since(then).map_or(0.0, |d| d.as_secs_f64());
@@ -1302,11 +1306,13 @@ mod tests {
         assert!(ticks[1] >= ticks[0] + 10, "{ticks:?}");
     }
 
-    /// claude 10 with children `kids`, at 0 cpu in sysinfo, updated `secs`
+    /// claude 10 at 0.2 cores in sysinfo with children `kids`, updated `secs`
     /// after the epoch with each pid's clock ticks from `ticks`. Returns the
     /// tree's cores.
     fn tree_cores(cpu: &mut TreeCpu, kids: &[u32], secs: u64, ticks: &[(u32, u64)]) -> f32 {
-        let procs = std::iter::once(proc(10, 1, 100, "claude"))
+        let (pid, mut root) = proc(10, 1, 100, "claude");
+        root.cpu = 20.0;
+        let procs = std::iter::once((pid, root))
             .chain(kids.iter().map(|&k| proc(k, 10, 100, "sh")))
             .collect();
         let mut agents = scan(&procs, home(), &[], no_session);
@@ -1322,11 +1328,20 @@ mod tests {
     #[test]
     fn child_exited_between_ticks_counts() {
         let mut cpu = TreeCpu::default();
-        assert_eq!(tree_cores(&mut cpu, &[11], 0, &[(10, 100), (11, 50)]), 0.0);
+        assert_eq!(tree_cores(&mut cpu, &[11], 0, &[(10, 100), (11, 50)]), 0.2);
         // 11 ran 70 more ticks and exited, and a child that came and went
         // between ticks ran 80; 10 reaped both
         let reaped = 50 + 70 + 80;
         assert_eq!(tree_cores(&mut cpu, &[], 2, &[(10, 100 + reaped)]), 0.75);
+    }
+
+    #[test]
+    fn child_reaped_between_reads_skips_the_sample() {
+        let mut cpu = TreeCpu::default();
+        tree_cores(&mut cpu, &[11], 0, &[(10, 100), (11, 6000)]);
+        // 10 was read before it reaped 11, and 11 was gone when read
+        assert_eq!(tree_cores(&mut cpu, &[11], 1, &[(10, 100)]), 0.2);
+        assert_eq!(tree_cores(&mut cpu, &[], 2, &[(10, 100 + 6000 + 100)]), 0.5);
     }
 
     #[test]
