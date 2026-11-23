@@ -697,16 +697,13 @@ const USER_HZ: f64 = 100.0;
 /// utime + stime + cutime + cstime of a `/proc/<pid>/stat` line, in clock
 /// ticks: the process's own cpu plus that of the children it reaped.
 fn cpu_ticks(stat: &str) -> Option<u64> {
-    // fields 14 to 17; fields 3 on follow the `)` that ends the comm
-    let (_, rest) = stat.rsplit_once(')')?;
-    let mut fields = rest.split_whitespace().skip(11);
-    let mut sum = 0;
-    for _ in 0..4 {
-        // cutime and cstime are signed in the kernel
-        let ticks: i64 = fields.next()?.parse().ok()?;
-        sum += u64::try_from(ticks).unwrap_or(0);
-    }
-    Some(sum)
+    (14..=17)
+        .map(|n| {
+            // cutime and cstime are signed in the kernel
+            let ticks: i64 = claude::stat_field(stat, n)?.parse().ok()?;
+            Some(u64::try_from(ticks).unwrap_or(0))
+        })
+        .sum()
 }
 
 fn read_cpu_ticks(pid: Pid) -> Option<u64> {
