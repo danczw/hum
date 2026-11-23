@@ -102,7 +102,7 @@ impl Gauges {
                 .map(|c| f64::from(c.usage()) / 100.0)
                 .collect(),
             mem: (sys.used_memory(), sys.total_memory()),
-            swap: meminfo::read_swap().unwrap_or((sys.used_swap(), sys.total_swap())),
+            swap: meminfo::read_swap().unwrap_or_else(|| (sys.used_swap(), sys.total_swap())),
         }
     }
 }
