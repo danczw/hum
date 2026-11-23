@@ -1194,7 +1194,13 @@ mod tests {
         let procs = HashMap::from([proc(11, 1, 101, "bash"), proc(12, 1, 500, "tail")]);
         tick(&mut env, &procs);
         tick(&mut env, &procs);
-        let mut reads: Vec<u32> = host.reads.borrow().iter().map(|&(_, pid)| pid).collect();
+        let mut reads: Vec<u32> = host
+            .reads
+            .borrow()
+            .iter()
+            .filter(|&&(file, _)| file == "environ")
+            .map(|&(_, pid)| pid)
+            .collect();
         reads.sort_unstable();
         assert_eq!(reads, [11, 12, 12]);
     }
