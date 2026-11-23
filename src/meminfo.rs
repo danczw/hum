@@ -7,28 +7,29 @@ pub fn read_swap() -> Option<(u64, u64)> {
 
 /// Swap (used, total) in bytes from the text of `/proc/meminfo`. Used leaves
 /// out SwapCached, which also sits in RAM, and Zswapped, which is compressed
-/// in RAM rather than on the device, as htop does. Zswapped is absent before
-/// Linux 5.19 and counts as 0 then. None without SwapTotal or SwapFree.
+/// in RAM rather than on the device, as htop does. SwapCached or Zswapped
+/// counts as 0 when absent or unreadable; Zswapped is absent before Linux
+/// 5.19. None without a readable SwapTotal and SwapFree.
 fn swap(meminfo: &str) -> Option<(u64, u64)> {
-    let (mut total, mut free, mut cached, mut zswapped) = (None, None, 0, 0);
+    let (mut total, mut free, mut cached, mut zswapped) = (None, None, None, None);
     for line in meminfo.lines() {
         let Some((key, value)) = line.split_once(':') else {
             continue;
         };
         let slot = match key {
-            "SwapTotal" => total.insert(0),
-            "SwapFree" => free.insert(0),
+            "SwapTotal" => &mut total,
+            "SwapFree" => &mut free,
             "SwapCached" => &mut cached,
             "Zswapped" => &mut zswapped,
             _ => continue,
         };
-        *slot = kib(value)?;
+        *slot = kib(value);
     }
     let total = total?;
     let used = total
         .saturating_sub(free?)
-        .saturating_sub(cached)
-        .saturating_sub(zswapped);
+        .saturating_sub(cached.unwrap_or(0))
+        .saturating_sub(zswapped.unwrap_or(0));
     Some((used, total))
 }
 
@@ -78,6 +79,12 @@ Dirty:               412 kB
     fn no_swap() {
         let none = "SwapCached: 0 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n";
         assert_eq!(swap(none), Some((0, 0)));
+    }
+
+    #[test]
+    fn unreadable_optional_field_counts_as_zero() {
+        let odd = MEMINFO.replace("Zswapped:         262144 kB", "Zswapped:         262144");
+        assert_eq!(swap(&odd), Some((960 * MIB, 8192 * MIB)));
     }
 
     #[test]
