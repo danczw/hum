@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -9,6 +8,7 @@ use sysinfo::{Pid, System};
 
 use crate::claude::{self, Name, SessionFile, SessionId, Subagent};
 use crate::focus::{Key, key};
+use crate::host::{Host, ProcHost};
 use crate::label::{Label, cut};
 
 /// Process names that mark the root of an agent session.
@@ -549,15 +549,14 @@ impl EnvOrphans {
         }
     }
 
-    /// Lists marked processes outside every agent tree, unsorted. `read`
-    /// returns a pid's raw environ, see [`read_environ`].
+    /// Lists marked processes outside every agent tree, unsorted.
     pub fn update(
         &mut self,
         procs: &HashMap<Pid, ProcInfo>,
         agents: &[Agent],
         home: Option<&Path>,
         extra: &[&'static str],
-        mut read: impl FnMut(Pid) -> Option<Vec<u8>>,
+        host: &impl Host,
     ) -> Vec<Orphan> {
         self.markers
             .retain(|&pid, (start, _)| live(procs, pid, *start).is_some());
@@ -573,7 +572,7 @@ impl EnvOrphans {
                 let (kind, agent) = self
                     .markers
                     .entry(p.pid)
-                    .or_insert_with(|| (p.start, read(p.pid).and_then(|env| marker(&env))))
+                    .or_insert_with(|| (p.start, host.environ(p.pid).and_then(|env| marker(&env))))
                     .1?;
                 // Still under its agent, which scan did not recognise as a
                 // session, e.g. `node cli.js`.
@@ -596,10 +595,6 @@ impl EnvOrphans {
             })
             .collect()
     }
-}
-
-fn read_environ(pid: Pid) -> Option<Vec<u8>> {
-    fs::read(format!("/proc/{pid}/environ")).ok()
 }
 
 /// The first [`MARKERS`] entry set in a raw `/proc/<pid>/environ`.
@@ -695,22 +690,6 @@ impl BusyTracker {
 /// it at 100 for userspace on x86 and arm.
 const USER_HZ: f64 = 100.0;
 
-/// utime + stime + cutime + cstime of a `/proc/<pid>/stat` line, in clock
-/// ticks: the process's own cpu plus that of the children it reaped.
-fn cpu_ticks(stat: &str) -> Option<u64> {
-    (14..=17)
-        .map(|n| {
-            // cutime and cstime are signed in the kernel
-            let ticks: i64 = claude::stat_field(stat, n)?.parse().ok()?;
-            Some(u64::try_from(ticks).unwrap_or(0))
-        })
-        .sum()
-}
-
-fn read_cpu_ticks(pid: Pid) -> Option<u64> {
-    cpu_ticks(&fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
-}
-
 /// Tree cpu from /proc clock ticks, which sysinfo misses for a child that
 /// starts and exits between ticks: its time moves into the cutime of the
 /// tree member that reaps it, so the tree total carries it over.
@@ -733,19 +712,18 @@ impl TreeCpu {
     /// whole read. A read that can't be used holds the last value, or
     /// sysinfo's sum before the first: one with a member that can't be read,
     /// or one whose ticks fell because a member left the tree with them.
-    pub fn update(
-        &mut self,
-        agents: &mut [Agent],
-        now: Instant,
-        read: impl Fn(Pid) -> Option<u64>,
-    ) {
+    pub fn update(&mut self, agents: &mut [Agent], now: Instant, host: &impl Host) {
         let roots: HashSet<Key> = agents.iter().map(Agent::key).collect();
         self.prev.retain(|root, _| roots.contains(root));
         for agent in agents {
             // Parents come before their children, so a child reaped between
             // the two reads is in neither; such a read is None and leaves the
             // last whole one to diff the next against.
-            let ticks = agent.procs.iter().map(|p| read(p.pid)).sum::<Option<u64>>();
+            let ticks = agent
+                .procs
+                .iter()
+                .map(|p| Some(host.stat(p.pid)?.cpu))
+                .sum::<Option<u64>>();
             let last = self.prev.get(&agent.key()).copied();
             let fresh = match (ticks, last) {
                 (Some(ticks), Some(last)) if ticks >= last.ticks => {
@@ -775,39 +753,36 @@ impl TreeCpu {
 
 /// Fills agents and orphans from a process snapshot each tick, keeping the
 /// state that spans ticks.
-pub struct Sessions {
+pub struct Sessions<H = ProcHost> {
+    host: H,
     home: Option<PathBuf>,
     /// See [`claude::config`].
     claude: Option<PathBuf>,
     /// Names added with `--agent`, see [`scan`].
     extra: Vec<&'static str>,
     cpu: TreeCpu,
-    /// See [`read_cpu_ticks`].
-    stat: fn(Pid) -> Option<u64>,
     busy: BusyTracker,
     tracker: OrphanTracker,
     env: EnvOrphans,
-    /// See [`read_environ`].
-    environ: fn(Pid) -> Option<Vec<u8>>,
 }
 
-impl Sessions {
+impl<H: Host> Sessions<H> {
     pub fn new(
         home: Option<PathBuf>,
         claude: Option<PathBuf>,
         extra: Vec<&'static str>,
         tick: Duration,
+        host: H,
     ) -> Self {
         Self {
+            host,
             home,
             claude,
             extra,
             cpu: TreeCpu::default(),
-            stat: read_cpu_ticks,
             busy: BusyTracker::new(busy_window(tick)),
             tracker: OrphanTracker::default(),
             env: EnvOrphans::new(Pid::from_u32(std::process::id())),
-            environ: read_environ,
         }
     }
 
@@ -818,10 +793,10 @@ impl Sessions {
     ) -> (Vec<Agent>, Vec<Orphan>) {
         let (home, claude) = (self.home.as_deref(), self.claude.as_deref());
         let mut agents = scan(procs, home, &self.extra, |pid| {
-            claude::read_session(claude?, pid)
+            claude::read_session(claude?, pid, &self.host)
         });
         // before the subagent reads, so fewer members exit since the snapshot
-        self.cpu.update(&mut agents, Instant::now(), self.stat);
+        self.cpu.update(&mut agents, Instant::now(), &self.host);
         if let Some(claude) = claude {
             for agent in &mut agents {
                 if let Some(id) = &agent.session_id {
@@ -834,7 +809,7 @@ impl Sessions {
         let orphans = merge(
             self.tracker.update(procs, &agents),
             self.env
-                .update(procs, &agents, home, &self.extra, self.environ),
+                .update(procs, &agents, home, &self.extra, &self.host),
         );
         (agents, orphans)
     }
@@ -867,6 +842,7 @@ mod tests {
     use super::fixture::proc;
     use super::*;
     use crate::claude::fixture;
+    use crate::host::{MemHost, Stat};
 
     fn kind(cmd: &str) -> Option<&'static str> {
         let cmd: Vec<OsString> = cmd.split(' ').map(OsString::from).collect();
@@ -1093,18 +1069,20 @@ mod tests {
     /// pid 99.
     fn env_orphans(procs: &HashMap<Pid, ProcInfo>, marked: &[u32], agent: u32) -> Vec<Orphan> {
         let mut env = EnvOrphans::new(Pid::from_u32(99));
-        let read = |pid: Pid| {
-            let var = format!("CLAUDE_PID={agent}");
-            marked
-                .contains(&pid.as_u32())
-                .then(|| environ(&["PATH=/bin", &var]))
+        let var = format!("CLAUDE_PID={agent}");
+        let host = MemHost {
+            environs: marked
+                .iter()
+                .map(|&pid| (Pid::from_u32(pid), environ(&["PATH=/bin", &var])))
+                .collect(),
+            ..MemHost::default()
         };
         env.update(
             procs,
             &scan(procs, home(), &[], no_session),
             home(),
             &[],
-            read,
+            &host,
         )
     }
 
@@ -1177,14 +1155,14 @@ mod tests {
     #[test]
     fn environ_read_once_per_process() {
         let mut env = EnvOrphans::new(Pid::from_u32(99));
-        let mut reads = Vec::new();
-        let mut tick = |env: &mut EnvOrphans, procs: &HashMap<Pid, ProcInfo>| {
+        // 12 is another user's process, so its environ is unreadable
+        let host = MemHost {
+            environs: HashMap::from([(Pid::from_u32(11), environ(&["CLAUDE_PID=10"]))]),
+            ..MemHost::default()
+        };
+        let tick = |env: &mut EnvOrphans, procs: &HashMap<Pid, ProcInfo>| {
             let agents = scan(procs, home(), &[], no_session);
-            env.update(procs, &agents, home(), &[], |pid| {
-                reads.push(pid.as_u32());
-                // 12 is another user's process
-                (pid.as_u32() != 12).then(|| environ(&["CLAUDE_PID=10"]))
-            });
+            env.update(procs, &agents, home(), &[], &host);
         };
         let procs = HashMap::from([
             proc(10, 1, 100, "claude"),
@@ -1197,6 +1175,7 @@ mod tests {
         let procs = HashMap::from([proc(11, 1, 101, "bash"), proc(12, 1, 500, "tail")]);
         tick(&mut env, &procs);
         tick(&mut env, &procs);
+        let mut reads: Vec<u32> = host.reads.borrow().iter().map(|&(_, pid)| pid).collect();
         reads.sort_unstable();
         assert_eq!(reads, [11, 12, 12]);
     }
@@ -1300,21 +1279,6 @@ mod tests {
         assert!(!agents[0].busy());
     }
 
-    /// A stat line of `comm` with the given utime, stime, cutime and cstime.
-    fn stat_line(comm: &str, [utime, stime, cutime, cstime]: [i64; 4]) -> String {
-        format!(
-            "42 ({comm}) S 1 42 42 0 -1 4194304 0 0 0 0 {utime} {stime} {cutime} {cstime} 20 0 1 0 100"
-        )
-    }
-
-    #[test]
-    fn cpu_ticks_add_own_and_reaped_time() {
-        assert_eq!(cpu_ticks(&stat_line("sh", [1, 2, 30, 40])), Some(73));
-        assert_eq!(cpu_ticks(&stat_line("a) b", [1, 2, 3, 4])), Some(10));
-        assert_eq!(cpu_ticks(&stat_line("sh", [1, 2, -3, 4])), Some(7));
-        assert_eq!(cpu_ticks("42 (sh) S 1 42"), None);
-    }
-
     #[test]
     fn reaped_child_time_reads_on_parent() {
         // the inner sh runs until its own stat reads 20 ticks; the outer one
@@ -1327,7 +1291,7 @@ mod tests {
             .output()
             .unwrap();
         let out = String::from_utf8(out.stdout).unwrap();
-        let ticks: Vec<Option<u64>> = out.lines().map(cpu_ticks).collect();
+        let ticks: Vec<Option<u64>> = out.lines().map(|l| Some(Stat::parse(l)?.cpu)).collect();
         let [Some(before), Some(after)] = ticks[..] else {
             panic!("{out}");
         };
@@ -1350,11 +1314,11 @@ mod tests {
             .chain(kids.iter().map(|&k| proc(k, 10, 100, "sh")))
             .collect();
         let mut agents = scan(&procs, home(), &[], no_session);
-        let ticks: HashMap<Pid, u64> = ticks
-            .iter()
-            .map(|&(pid, t)| (Pid::from_u32(pid), t))
-            .collect();
-        cpu.update(&mut agents, after(secs), |pid| ticks.get(&pid).copied());
+        let mut host = MemHost::default();
+        for &(pid, t) in ticks {
+            host.cpu(pid, t);
+        }
+        cpu.update(&mut agents, after(secs), &host);
         cores(agents[0].cpu)
     }
 
@@ -1400,9 +1364,11 @@ mod tests {
     fn tree_cpu_without_previous_ticks_keeps_sysinfo() {
         let mut cpu = TreeCpu::default();
         let mut agents = session(10, 100, 0.4);
-        cpu.update(&mut agents, after(5), |_| Some(1000));
+        let mut host = MemHost::default();
+        host.cpu(10, 1000);
+        cpu.update(&mut agents, after(5), &host);
         assert_eq!(agents[0].cpu, agents[0].procs[0].cpu);
-        cpu.update(&mut [], after(2), |_| None);
+        cpu.update(&mut [], after(2), &MemHost::default());
         assert!(cpu.prev.is_empty());
     }
 
@@ -1659,9 +1625,11 @@ mod tests {
         procs.extend([proc(11, 1, 101, "tail")]);
         let agents = scan(&procs, home(), &[], files(&[(10, given("gate", HUM))]));
         let mut env = EnvOrphans::new(Pid::from_u32(99));
-        let orphans = env.update(&procs, &agents, home(), &[], |pid| {
-            (pid.as_u32() == 11).then(|| environ(&["CLAUDE_PID=10"]))
-        });
+        let host = MemHost {
+            environs: HashMap::from([(Pid::from_u32(11), environ(&["CLAUDE_PID=10"]))]),
+            ..MemHost::default()
+        };
+        let orphans = env.update(&procs, &agents, home(), &[], &host);
         assert_eq!(orphans[0].from.to_string(), "claude/hum·gate");
     }
 
@@ -1688,13 +1656,11 @@ mod tests {
             Some(config.clone()),
             Vec::new(),
             Duration::from_secs(1),
+            MemHost::default(),
         );
-        // the fake pids may be real processes on this machine
-        sessions.environ = |_| None;
-        sessions.stat = |_| None;
         let procs = HashMap::from([in_dir(proc(10, 1, 100, "claude"), "/x/hum")]);
         let (agents, _) = sessions.observe(&procs, now);
-        fs::remove_dir_all(&config).unwrap();
+        std::fs::remove_dir_all(&config).unwrap();
         assert_eq!(agents[0].reported, Some(false));
         assert_eq!(agents[0].subagents.len(), 1);
         assert!(agents[0].busy());

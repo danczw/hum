@@ -5,6 +5,8 @@ use std::time::{Duration, SystemTime};
 
 use sysinfo::Pid;
 
+use crate::host::Host;
+
 /// How long a subagent's transcript may go unwritten before it counts as
 /// stopped, see [`running_subagents`]. A minute past Claude Code's longest
 /// Bash timeout, 10 minutes, so a subagent waiting on one command stays
@@ -83,32 +85,23 @@ pub fn config(config_dir: Option<OsString>, home: Option<&Path>) -> Option<PathB
 /// A running session's file under `$CLAUDE_CONFIG_DIR` or `~/.claude`.
 /// None when the file is from an earlier process on the same pid, see
 /// [`same_process`].
-pub fn read_session(config: &Path, pid: Pid) -> Option<SessionFile> {
+pub fn read_session(config: &Path, pid: Pid, host: &impl Host) -> Option<SessionFile> {
     let file = fs::read_to_string(config.join("sessions").join(format!("{pid}.json"))).ok()?;
-    let stat = || fs::read_to_string(format!("/proc/{pid}/stat")).ok();
-    same_process(&file, stat).then(|| SessionFile::parse(&file))
+    same_process(&file, pid, host).then(|| SessionFile::parse(&file))
 }
 
-/// False when the file's `procStart` differs from the start time in clock
-/// ticks in `/proc/<pid>/stat`, i.e. the file outlived its process and the
-/// pid was reused. Its `startedAt` is no guard: on a live session it read
-/// 223s after the process start. Files without `procStart` pass without
-/// reading `stat`; a `procStart` that is not a number fails.
-fn same_process(file: &str, stat: impl FnOnce() -> Option<String>) -> bool {
+/// False when the file's `procStart` differs from `pid`'s start time in
+/// clock ticks, i.e. the file outlived its process and the pid was reused.
+/// Its `startedAt` is no guard: on a live session it read 223s after the
+/// process start. Files without `procStart` pass without reading the stat;
+/// a `procStart` that is not a number fails.
+fn same_process(file: &str, pid: Pid, host: &impl Host) -> bool {
     let start = match top_level(file, "procStart") {
         None => return true,
         Some(Field::Str(v) | Field::Raw(v)) => v.trim().parse::<u64>(),
     };
     let Ok(start) = start else { return false };
-    stat().is_some_and(|stat| stat_field(&stat, 22).is_some_and(|t| t.parse() == Ok(start)))
-}
-
-/// Field `n` of a `/proc/<pid>/stat` line, numbered from 1 as in proc(5),
-/// for `n` of 3 on; None below. The comm in field 2 may hold spaces and `)`,
-/// so fields are counted from the last `)`.
-pub fn stat_field(stat: &str, n: usize) -> Option<&str> {
-    let (_, rest) = stat.rsplit_once(')')?;
-    rest.split_whitespace().nth(n.checked_sub(3)?)
+    host.stat(pid).is_some_and(|stat| stat.start == start)
 }
 
 /// Subagents still running in session `session` at `cwd`, oldest first.
@@ -337,6 +330,7 @@ pub mod fixture {
 mod tests {
     use super::fixture::subagent_dir;
     use super::*;
+    use crate::host::{MemHost, Stat};
 
     const HUM: &str = "/home/u/code/hum";
 
@@ -397,40 +391,41 @@ mod tests {
         assert_eq!(parsed("5e55"), Some(id("5e55")));
     }
 
+    /// A host where pid 1 started at clock tick `start`.
+    fn started(start: u64) -> MemHost {
+        let mut host = MemHost::default();
+        host.stats.insert(Pid::from_u32(1), Stat { start, cpu: 0 });
+        host
+    }
+
+    /// [`same_process`] for pid 1.
+    fn same(file: &str, host: &MemHost) -> bool {
+        same_process(file, Pid::from_u32(1), host)
+    }
+
     #[test]
     fn file_of_earlier_process_on_pid_is_stale() {
         let file = r#"{"cwd":"/home/u/code/hum","procStart":"1223063","name":"gate"}"#;
-        let stat = |start: u64| {
-            move || {
-                Some(format!(
-                    "81045 (claude) S 1 2 3 {} {start} 0",
-                    "0 ".repeat(15)
-                ))
-            }
-        };
-        assert!(same_process(file, stat(1223063)));
-        assert!(!same_process(file, stat(1300000)));
-        assert!(!same_process(file, || Some("garbage".into())));
+        assert!(same(file, &started(1223063)));
+        assert!(!same(file, &started(1300000)));
         // stat gone, e.g. the process exited
-        assert!(!same_process(file, || None));
-        // a comm with spaces and parens
-        let odd = format!("81045 (a) b) S 1 2 3 {} 1223063 0", "0 ".repeat(15));
-        assert!(same_process(file, || Some(odd)));
+        assert!(!same(file, &MemHost::default()));
     }
 
     #[test]
     fn proc_start_as_number_or_garbage() {
-        let stat = || Some(format!("1 (claude) S 1 2 3 {} 1223063 0", "0 ".repeat(15)));
-        assert!(same_process(r#"{"procStart":1223063,"cwd":"/x"}"#, stat));
-        assert!(!same_process(r#"{"procStart":"soon"}"#, stat));
-        assert!(!same_process(r#"{"procStart":{"t":1223063}}"#, stat));
-        assert!(!same_process(r#"{"procStart":null}"#, stat));
+        let host = started(1223063);
+        assert!(same(r#"{"procStart":1223063,"cwd":"/x"}"#, &host));
+        assert!(!same(r#"{"procStart":"soon"}"#, &host));
+        assert!(!same(r#"{"procStart":{"t":1223063}}"#, &host));
+        assert!(!same(r#"{"procStart":null}"#, &host));
     }
 
     #[test]
     fn missing_proc_start_skips_stat() {
-        let stat = || -> Option<String> { panic!("stat read without procStart") };
-        assert!(same_process(r#"{"cwd":"/x"}"#, stat));
+        let host = MemHost::default();
+        assert!(same(r#"{"cwd":"/x"}"#, &host));
+        assert!(host.reads.borrow().is_empty());
     }
 
     #[test]
