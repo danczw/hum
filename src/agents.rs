@@ -177,13 +177,13 @@ impl Agent {
 }
 
 /// `extra` holds the names added with `--agent`, matched after [`AGENTS`].
-/// Claude sessions read their file from `claude`, see
+/// Claude sessions read their file from `config`, see
 /// [`claude::read_session`].
 pub fn scan(
     procs: &HashMap<Pid, ProcInfo>,
     home: Option<&Path>,
     extra: &[&'static str],
-    claude: Option<&Path>,
+    config: Option<&Path>,
     host: &impl Host,
 ) -> Vec<Agent> {
     let mut children: HashMap<Pid, Vec<Pid>> = HashMap::new();
@@ -232,7 +232,7 @@ pub fn scan(
     agents.sort_by_key(|a| (a.root().start, a.root().pid));
     let files: Vec<Option<SessionFile>> = agents
         .iter()
-        .map(|a| session_file(&procs[&a.root().pid], a.kind, claude, host))
+        .map(|a| session_file(&procs[&a.root().pid], a.kind, config, host))
         .collect();
     name_sessions(procs, &mut agents, &files);
     for (agent, file) in agents.iter_mut().zip(files) {
@@ -304,11 +304,11 @@ fn name_sessions(
 fn session_file(
     info: &ProcInfo,
     kind: &str,
-    claude: Option<&Path>,
+    config: Option<&Path>,
     host: &impl Host,
 ) -> Option<SessionFile> {
     (kind == "claude")
-        .then(|| claude::read_session(claude?, info.pid, host))
+        .then(|| claude::read_session(config?, info.pid, host))
         .flatten()
         .filter(|f| f.cwd.is_some() && f.cwd.as_deref() == info.cwd.as_deref())
 }
