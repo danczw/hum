@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::time::{Duration, Instant};
 
 use sysinfo::Pid;
 
@@ -8,8 +9,10 @@ use crate::host::{Host, ProcHost};
 
 /// Socket state code for LISTEN in /proc/net/tcp.
 const TCP_LISTEN: u8 = 0x0A;
-/// Ports change rarely and resolving holders reads every fd in /proc.
-const PORT_TICKS: u32 = 5;
+/// Ports change rarely and resolving holders reads every fd in /proc. Time,
+/// not a tick count, so a long `--interval` does not leave ports stale for
+/// several ticks.
+const PORT_REREAD: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub struct Listener {
@@ -44,11 +47,12 @@ impl Listener {
 }
 
 /// Fills listening ports from a process snapshot each tick: rereads the
-/// socket tables every [`PORT_TICKS`] ticks and joins the last read to the
-/// snapshot in between.
+/// socket tables once [`PORT_REREAD`] has passed and joins the last read to
+/// the snapshot in between.
 pub struct Ports<H = ProcHost> {
     host: H,
-    ticks: u32,
+    /// When the socket tables were last read; None before the first read.
+    read_at: Option<Instant>,
     last: Vec<Listener>,
 }
 
@@ -56,7 +60,7 @@ impl<H: Host> Ports<H> {
     pub fn new(host: H) -> Self {
         Self {
             host,
-            ticks: 0,
+            read_at: None,
             last: Vec::new(),
         }
     }
@@ -66,15 +70,19 @@ impl<H: Host> Ports<H> {
     pub fn observe(
         &mut self,
         procs: &HashMap<Pid, ProcInfo>,
+        now: Instant,
         agents: &[Agent],
         orphans: &[Orphan],
     ) -> Vec<Listener> {
-        if self.ticks.is_multiple_of(PORT_TICKS) {
+        if self
+            .read_at
+            .is_none_or(|at| now.saturating_duration_since(at) >= PORT_REREAD)
+        {
             self.last = listening(&self.host, procs);
+            self.read_at = Some(now);
         } else {
             join(&mut self.last, procs);
         }
-        self.ticks = self.ticks.wrapping_add(1);
         for l in &mut self.last {
             l.owner = l
                 .holder
@@ -318,6 +326,12 @@ mod tests {
         assert_eq!(master(&pids(&[12]), &procs), Some(Pid::from_u32(12)));
     }
 
+    /// `ms` after an instant fixed for the test run.
+    fn after(ms: u64) -> Instant {
+        static START: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
+        *START + Duration::from_millis(ms)
+    }
+
     /// Port, holder pid and holder name of each listener.
     fn rows(ports: &[Listener]) -> Vec<(u16, Option<u32>, &str)> {
         ports
@@ -337,7 +351,7 @@ mod tests {
         fake.hold(2, &[21, 20]);
         let mut ports = Ports::new(fake);
         // a fresh map each read, so its hash order varies
-        for _ in 0..PORT_TICKS * 8 {
+        for n in 0..40 {
             let procs = HashMap::from([
                 proc(12, 10, 102, "nginx"),
                 proc(11, 10, 101, "nginx"),
@@ -345,7 +359,7 @@ mod tests {
                 proc(21, 1, 201, "worker"),
                 proc(20, 1, 200, "worker"),
             ]);
-            let got = ports.observe(&procs, &[], &[]);
+            let got = ports.observe(&procs, after(n * 5000), &[], &[]);
             assert_eq!(
                 rows(&got),
                 [(80, Some(10), "nginx"), (9000, Some(20), "worker")]
@@ -364,15 +378,15 @@ mod tests {
         let mut ports = Ports::new(fake);
         let procs = HashMap::from([proc(10, 1, 100, "npm"), proc(20, 1, 200, "vite")]);
         assert_eq!(
-            rows(&ports.observe(&procs, &[], &[])),
+            rows(&ports.observe(&procs, after(0), &[], &[])),
             [(3000, Some(10), "npm"), (5173, Some(20), "vite")]
         );
 
         // pid 10 exec'd into node; pid 20 exited and was reused
         let procs = HashMap::from([proc(10, 1, 100, "node"), proc(20, 1, 300, "bash")]);
-        for _ in 1..PORT_TICKS {
+        for secs in 1..5 {
             assert_eq!(
-                rows(&ports.observe(&procs, &[], &[])),
+                rows(&ports.observe(&procs, after(secs * 1000), &[], &[])),
                 [(3000, Some(10), "node")]
             );
         }
@@ -380,7 +394,7 @@ mod tests {
         // the socket outlived vite in a holder whose fds are unreadable
         ports.host.sockets.remove(&Pid::from_u32(20));
         assert_eq!(
-            rows(&ports.observe(&procs, &[], &[])),
+            rows(&ports.observe(&procs, after(5000), &[], &[])),
             [(3000, Some(10), "node"), (5173, None, "")]
         );
     }
@@ -401,7 +415,7 @@ mod tests {
                 .collect()
         };
         assert_eq!(
-            owners(&ports.observe(&procs, &agents, &[])),
+            owners(&ports.observe(&procs, after(0), &agents, &[])),
             [Some(("claude", false))]
         );
 
@@ -416,12 +430,37 @@ mod tests {
             cpu: 0.0,
             mem: 0,
         };
-        let got = ports.observe(&procs, &[], &[orphan]);
+        let got = ports.observe(&procs, after(1000), &[], &[orphan]);
         assert_eq!(rows(&got), [(8123, Some(30), "python3")]);
         assert_eq!(owners(&got), [Some(("claude", true))]);
 
         // stamped each tick, so the owner clears once no list claims the holder
-        assert_eq!(owners(&ports.observe(&procs, &[], &[])), [None]);
+        assert_eq!(
+            owners(&ports.observe(&procs, after(2000), &[], &[])),
+            [None]
+        );
+    }
+
+    #[test]
+    fn reread_follows_elapsed_time_not_refresh_count() {
+        let mut ports = Ports::new(MemHost::default());
+        let procs = HashMap::from([proc(10, 1, 100, "python3")]);
+        let ports_at = |ports: &mut Ports<MemHost>, ms| ports.observe(&procs, after(ms), &[], &[]);
+        assert!(ports_at(&mut ports, 0).is_empty());
+        ports.host.listen.push((8123, 1));
+        ports.host.hold(1, &[10]);
+        // a 0.2s interval refreshes 24 times before the reread is due
+        for n in 1..25 {
+            assert!(ports_at(&mut ports, n * 200).is_empty(), "{n}");
+        }
+        assert_eq!(
+            rows(&ports_at(&mut ports, 5000)),
+            [(8123, Some(10), "python3")]
+        );
+
+        // a 10s interval rereads on every refresh
+        ports.host.listen.clear();
+        assert!(ports_at(&mut ports, 15000).is_empty());
     }
 
     #[test]

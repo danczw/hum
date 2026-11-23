@@ -70,7 +70,9 @@ impl App {
         );
         let procs = agents::snapshot(&self.sys);
         let (agents, orphans) = self.sessions.observe(&procs, SystemTime::now());
-        let ports = self.ports.observe(&procs, &agents, &orphans);
+        let ports = self
+            .ports
+            .observe(&procs, Instant::now(), &agents, &orphans);
         Snapshot {
             gauges: Gauges::read(&self.sys, &self.host),
             agents,
