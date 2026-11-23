@@ -1,16 +1,9 @@
-use std::fs;
-
-/// Swap (used, total) in bytes from `/proc/meminfo`, or None when unreadable.
-pub fn read_swap() -> Option<(u64, u64)> {
-    swap(&fs::read_to_string("/proc/meminfo").ok()?)
-}
-
 /// Swap (used, total) in bytes from the text of `/proc/meminfo`. Used leaves
 /// out SwapCached, which also sits in RAM, and Zswapped, which is compressed
 /// in RAM rather than on the device, as htop does. SwapCached or Zswapped
 /// counts as 0 when absent or unreadable; Zswapped is absent before Linux
 /// 5.19. None without a readable SwapTotal and SwapFree.
-fn swap(meminfo: &str) -> Option<(u64, u64)> {
+pub fn swap(meminfo: &str) -> Option<(u64, u64)> {
     let (mut total, mut free, mut cached, mut zswapped) = (None, None, None, None);
     for line in meminfo.lines() {
         let Some((key, value)) = line.split_once(':') else {

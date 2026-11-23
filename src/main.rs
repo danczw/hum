@@ -2,6 +2,7 @@ mod agents;
 mod claude;
 mod cli;
 mod focus;
+mod host;
 mod label;
 mod meminfo;
 mod outline;
@@ -19,8 +20,9 @@ use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 use agents::Sessions;
 use cli::Action;
+use host::{Host, ProcHost};
 use outline::Fold;
-use ports::{Ports, ProcSockets};
+use ports::Ports;
 use theme::Theme;
 use ui::{Gauges, Snapshot, View};
 
@@ -29,6 +31,7 @@ const CPU_SETTLE: Duration = Duration::from_millis(200);
 
 struct App {
     sys: System,
+    host: ProcHost,
     sessions: Sessions,
     ports: Ports,
     tick: Duration,
@@ -40,8 +43,9 @@ impl App {
         let claude = claude::config(std::env::var_os("CLAUDE_CONFIG_DIR"), home.as_deref());
         Ok(Self {
             sys: System::new().map_err(io::Error::other)?,
-            sessions: Sessions::new(home, claude, agents, tick),
-            ports: Ports::new(ProcSockets),
+            host: ProcHost,
+            sessions: Sessions::new(home, claude, agents, tick, ProcHost),
+            ports: Ports::new(ProcHost),
             tick,
         })
     }
@@ -68,7 +72,7 @@ impl App {
         let (agents, orphans) = self.sessions.observe(&procs, SystemTime::now());
         let ports = self.ports.observe(&procs, &agents, &orphans);
         Snapshot {
-            gauges: Gauges::read(&self.sys),
+            gauges: Gauges::read(&self.sys, &self.host),
             agents,
             orphans,
             ports,
@@ -79,7 +83,7 @@ impl App {
 impl Gauges {
     /// The only read of `System` for drawing. Reads every core each tick so
     /// the grid shows as soon as it is toggled.
-    fn read(sys: &System) -> Self {
+    fn read(sys: &System, host: &impl Host) -> Self {
         Self {
             cpu: f64::from(sys.global_cpu_usage()) / 100.0,
             cores: sys
@@ -88,7 +92,10 @@ impl Gauges {
                 .map(|c| f64::from(c.usage()) / 100.0)
                 .collect(),
             mem: (sys.used_memory(), sys.total_memory()),
-            swap: meminfo::read_swap().unwrap_or_else(|| (sys.used_swap(), sys.total_swap())),
+            swap: host
+                .meminfo()
+                .and_then(|m| meminfo::swap(&m))
+                .unwrap_or_else(|| (sys.used_swap(), sys.total_swap())),
         }
     }
 }
