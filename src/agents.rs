@@ -7,7 +7,6 @@ use std::time::{Duration, Instant, SystemTime};
 use sysinfo::{Pid, System};
 
 use crate::claude::{self, Name, SessionFile, SessionId, Subagent};
-use crate::focus::{Key, key};
 use crate::host::{Host, ProcHost};
 use crate::label::{Label, cut};
 
@@ -81,6 +80,13 @@ pub fn snapshot(sys: &System) -> HashMap<Pid, ProcInfo> {
         .collect()
 }
 
+/// Names a process across ticks; the start time tells a reused pid apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ProcKey {
+    pub pid: Pid,
+    pub start: u64,
+}
+
 pub struct Proc {
     pub pid: Pid,
     pub name: String,
@@ -102,8 +108,11 @@ impl Proc {
         }
     }
 
-    pub fn key(&self) -> Key {
-        key(self.pid, self.start)
+    pub fn key(&self) -> ProcKey {
+        ProcKey {
+            pid: self.pid,
+            start: self.start,
+        }
     }
 }
 
@@ -143,7 +152,7 @@ impl Agent {
         &self.procs[0]
     }
 
-    pub fn key(&self) -> Key {
+    pub fn key(&self) -> ProcKey {
         self.root().key()
     }
 
@@ -154,7 +163,7 @@ impl Agent {
         !self.subagents.is_empty() || self.reported.unwrap_or(self.cpu_busy)
     }
 
-    pub fn holds(&self, of: Key) -> bool {
+    pub fn holds(&self, of: ProcKey) -> bool {
         self.procs.iter().any(|p| p.key() == of)
     }
 
@@ -453,8 +462,11 @@ impl Orphan {
         }
     }
 
-    pub fn key(&self) -> Key {
-        key(self.pid, self.start)
+    pub fn key(&self) -> ProcKey {
+        ProcKey {
+            pid: self.pid,
+            start: self.start,
+        }
     }
 }
 
@@ -612,7 +624,7 @@ fn marker(environ: &[u8]) -> Option<Marker> {
 /// Which agent or orphan the process `pid` started at `start` belongs to,
 /// for tagging ports. A reused pid matches neither.
 pub fn owner(agents: &[Agent], orphans: &[Orphan], pid: Pid, start: u64) -> Option<Owner> {
-    let of = key(pid, start);
+    let of = ProcKey { pid, start };
     if let Some(agent) = agents.iter().find(|a| a.holds(of)) {
         return Some(Owner {
             label: agent.label(),
@@ -644,7 +656,7 @@ pub fn cores(pct: f32) -> f32 {
 pub struct BusyTracker {
     /// (root pid, start time) -> tree cpu per tick, newest last; start time
     /// guards against pid reuse.
-    samples: HashMap<Key, VecDeque<f32>>,
+    samples: HashMap<ProcKey, VecDeque<f32>>,
     /// Ticks averaged, see [`busy_window`].
     window: usize,
 }
@@ -672,7 +684,7 @@ impl BusyTracker {
     }
 
     pub fn update(&mut self, agents: &mut [Agent]) {
-        let roots: HashSet<Key> = agents.iter().map(Agent::key).collect();
+        let roots: HashSet<ProcKey> = agents.iter().map(Agent::key).collect();
         self.samples.retain(|root, _| roots.contains(root));
         for agent in agents {
             let window = self.samples.entry(agent.key()).or_default();
@@ -698,7 +710,7 @@ const USER_HZ: f64 = 100.0;
 #[derive(Default)]
 pub struct TreeCpu {
     /// (root pid, start time) -> its last whole read.
-    prev: HashMap<Key, TreeTicks>,
+    prev: HashMap<ProcKey, TreeTicks>,
 }
 
 #[derive(Clone, Copy)]
@@ -715,7 +727,7 @@ impl TreeCpu {
     /// sysinfo's sum before the first: one with a member that can't be read,
     /// or one whose ticks fell because a member left the tree with them.
     pub fn update(&mut self, agents: &mut [Agent], now: Instant, host: &impl Host) {
-        let roots: HashSet<Key> = agents.iter().map(Agent::key).collect();
+        let roots: HashSet<ProcKey> = agents.iter().map(Agent::key).collect();
         self.prev.retain(|root, _| roots.contains(root));
         for agent in agents {
             // Parents come before their children, so a child reaped between

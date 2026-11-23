@@ -507,7 +507,7 @@ fn orphans_section(orphans: &[Orphan], width: u16, theme: &Theme) -> Section {
             cores,
         )),
         rows,
-        keys: orphans.iter().map(Orphan::key).collect(),
+        keys: orphans.iter().map(|o| focus::key(o.key())).collect(),
         // name as wide as its `process` header; `from` takes the rest
         widths: columns(
             [
