@@ -48,9 +48,9 @@ pub trait SocketReader {
     /// The text of each TCP socket table, IPv4 and IPv6; an unreadable one
     /// is left out.
     fn tables(&self) -> Vec<String>;
-    /// Where each of `pid`'s fds links, e.g. `socket:[4296]`; empty when
-    /// its fd table is unreadable, as another user's is.
-    fn fd_targets(&self, pid: Pid) -> Vec<String>;
+    /// The socket inodes among `pid`'s fds; empty when its fd table is
+    /// unreadable, as another user's is.
+    fn socket_inodes(&self, pid: Pid) -> Vec<u64>;
 }
 
 /// Reads /proc. Linux only.
@@ -64,16 +64,19 @@ impl SocketReader for ProcSockets {
             .collect()
     }
 
-    fn fd_targets(&self, pid: Pid) -> Vec<String> {
+    /// Fd links read `socket:[4296]`.
+    fn socket_inodes(&self, pid: Pid) -> Vec<u64> {
         let Ok(fds) = fs::read_dir(format!("/proc/{pid}/fd")) else {
             return Vec::new();
         };
         fds.flatten()
             .filter_map(|fd| {
-                fs::read_link(fd.path())
-                    .ok()?
-                    .into_os_string()
-                    .into_string()
+                let target = fs::read_link(fd.path()).ok()?;
+                target
+                    .to_str()?
+                    .strip_prefix("socket:[")?
+                    .strip_suffix(']')?
+                    .parse()
                     .ok()
             })
             .collect()
@@ -265,12 +268,8 @@ fn socket_holders(
         return holders;
     }
     for &pid in pids {
-        for target in reader.fd_targets(pid) {
-            let inode = target
-                .strip_prefix("socket:[")
-                .and_then(|t| t.strip_suffix(']'))
-                .and_then(|t| t.parse().ok());
-            if let Some(inode) = inode.filter(|i| wanted.contains(i)) {
+        for inode in reader.socket_inodes(pid) {
+            if wanted.contains(&inode) {
                 holders.entry(inode).or_default().push(pid);
             }
         }
@@ -367,17 +366,18 @@ mod tests {
     struct Fake {
         /// (port, inode) of each LISTEN row on 127.0.0.1.
         rows: Vec<(u16, u64)>,
-        fds: HashMap<Pid, Vec<String>>,
+        /// Socket inodes held per pid.
+        fds: HashMap<Pid, Vec<u64>>,
     }
 
     impl Fake {
-        /// `pids` each hold socket `inode`, beside a pipe.
+        /// `pids` each hold socket `inode`, beside an unwanted one.
         fn hold(&mut self, inode: u64, pids: &[u32]) {
             for &pid in pids {
                 self.fds
                     .entry(Pid::from_u32(pid))
                     .or_default()
-                    .extend(["pipe:[1]".into(), format!("socket:[{inode}]")]);
+                    .extend([99, inode]);
             }
         }
     }
@@ -395,7 +395,7 @@ mod tests {
             ]
         }
 
-        fn fd_targets(&self, pid: Pid) -> Vec<String> {
+        fn socket_inodes(&self, pid: Pid) -> Vec<u64> {
             self.fds.get(&pid).cloned().unwrap_or_default()
         }
     }
