@@ -201,7 +201,9 @@ mod mem {
         fn tcp_tables(&self) -> Vec<String> {
             let header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode";
             let rows = self.listen.iter().map(|(port, inode)| {
-                format!("   0: 0100007F:{port:04X} 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 {inode} 1 0000000000000000 100 0 0 10 0")
+                // the kernel prints the address word in host byte order
+                let lo = u32::from_ne_bytes([127, 0, 0, 1]);
+                format!("   0: {lo:08X}:{port:04X} 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 {inode} 1 0000000000000000 100 0 0 10 0")
             });
             vec![
                 std::iter::once(header.to_string())
@@ -274,6 +276,34 @@ mod tests {
                 cpu: 10
             })
         );
+    }
+
+    /// The one test of ProcHost's file reads; every caller runs on MemHost.
+    #[test]
+    fn proc_host_reads_files_with_full_paths_and_mtimes() {
+        let dir = std::env::temp_dir().join(format!("hum-host-{}", std::process::id()));
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        let file = dir.join("a.json");
+        fs::write(&file, "{}").unwrap();
+        let at = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000);
+        fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+        let host = ProcHost;
+        let mut listed = host.list(&dir).unwrap();
+        listed.sort();
+        let (read, times) = (host.read(&file), host.times(&file).map(|t| t.modified));
+        let is_dir = (host.is_dir(&dir.join("sub")), host.is_dir(&file));
+        let file_listed = host.list(&file);
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(listed, [file.clone(), dir.join("sub")]);
+        assert_eq!(read.as_deref(), Some("{}"));
+        assert_eq!(times, Some(at));
+        assert_eq!(is_dir, (true, false));
+        assert!(file_listed.is_none());
     }
 
     #[test]

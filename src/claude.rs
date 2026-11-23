@@ -333,7 +333,7 @@ pub mod fixture {
                 fields.push(format!(r#""status":"{status}""#));
             }
             if let Some(id) = &self.id {
-                fields.push(format!(r#""sessionId":"{}""#, id.0));
+                fields.push(format!(r#""sessionId":{}"#, quote(&id.0)));
             }
             let name = match &self.name {
                 Some(Name::Given(n)) => Some((n, "user")),
