@@ -113,6 +113,10 @@ pub struct Agent {
     pub project: String,
     /// The agent process first, then its descendants depth-first.
     pub procs: Vec<Proc>,
+    /// Tree cpu in percent of one core, counting children that exited since
+    /// the last tick, see [`TreeCpu::update`]. Per-process rows count only
+    /// their own cpu, so their sum can fall short of this.
+    pub cpu: f32,
     /// Tree cpu above [`BUSY_CORES`] over a full window, set by
     /// [`BusyTracker::update`].
     pub cpu_busy: bool,
@@ -129,10 +133,6 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn cpu(&self) -> f32 {
-        self.procs.iter().map(|p| p.cpu).sum()
-    }
-
     pub fn mem(&self) -> u64 {
         self.procs.iter().map(|p| p.mem).sum()
     }
@@ -214,6 +214,8 @@ pub fn scan(
             Agent {
                 kind,
                 project: project(procs[&pid].cwd.as_deref(), home),
+                // sysinfo's sum until TreeCpu has a previous tick
+                cpu: tree.iter().map(|p| p.cpu).sum(),
                 procs: tree,
                 cpu_busy: false,
                 reported: None,
@@ -681,9 +683,68 @@ impl BusyTracker {
             }
             // sampled with a reported status too, so the fallback has a full
             // window if the status goes away
-            window.push_back(agent.cpu());
+            window.push_back(agent.cpu);
             let mean = cores(window.iter().sum::<f32>() / window.len() as f32);
             agent.cpu_busy = window.len() == self.window && mean > BUSY_CORES;
+        }
+    }
+}
+
+/// Clock ticks per second in `/proc/<pid>/stat`, USER_HZ. The kernel fixes
+/// it at 100 for userspace on x86 and arm.
+const USER_HZ: f64 = 100.0;
+
+/// utime + stime + cutime + cstime of a `/proc/<pid>/stat` line, in clock
+/// ticks: the process's own cpu plus that of the children it reaped.
+fn cpu_ticks(stat: &str) -> Option<u64> {
+    // fields 14 to 17; fields 3 on follow the `)` that ends the comm
+    let (_, rest) = stat.rsplit_once(')')?;
+    let mut fields = rest.split_whitespace().skip(11);
+    let mut sum = 0;
+    for _ in 0..4 {
+        // cutime and cstime are signed in the kernel
+        let ticks: i64 = fields.next()?.parse().ok()?;
+        sum += u64::try_from(ticks).unwrap_or(0);
+    }
+    Some(sum)
+}
+
+fn read_cpu_ticks(pid: Pid) -> Option<u64> {
+    cpu_ticks(&fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+}
+
+/// Tree cpu from /proc clock ticks, which sysinfo misses for a child that
+/// starts and exits between ticks: its time moves into the cutime of the
+/// tree member that reaps it, so the tree total carries it over.
+#[derive(Default)]
+pub struct TreeCpu {
+    /// (root pid, start time) -> tree ticks and when they were read.
+    prev: HashMap<Key, (u64, SystemTime)>,
+}
+
+impl TreeCpu {
+    /// Sets each agent's cpu from the change in its tree ticks since the last
+    /// call. A first sight, or a clock that went back, keeps sysinfo's sum.
+    /// A member reaped outside the tree takes its ticks along, which reads 0
+    /// for that tick rather than below.
+    pub fn update(
+        &mut self,
+        agents: &mut [Agent],
+        now: SystemTime,
+        read: impl Fn(Pid) -> Option<u64>,
+    ) {
+        let roots: HashSet<Key> = agents.iter().map(Agent::key).collect();
+        self.prev.retain(|root, _| roots.contains(root));
+        for agent in agents {
+            // a member that exited since the snapshot reads None and is skipped
+            let ticks: u64 = agent.procs.iter().filter_map(|p| read(p.pid)).sum();
+            let prev = self.prev.insert(agent.key(), (ticks, now));
+            let Some((before, then)) = prev else { continue };
+            let span = now.duration_since(then).map_or(0.0, |d| d.as_secs_f64());
+            if span > 0.0 {
+                let used = ticks.saturating_sub(before) as f64 / USER_HZ;
+                agent.cpu = (used / span * 100.0) as f32;
+            }
         }
     }
 }
@@ -696,6 +757,9 @@ pub struct Sessions {
     claude: Option<PathBuf>,
     /// Names added with `--agent`, see [`scan`].
     extra: Vec<&'static str>,
+    cpu: TreeCpu,
+    /// See [`read_cpu_ticks`].
+    stat: fn(Pid) -> Option<u64>,
     busy: BusyTracker,
     tracker: OrphanTracker,
     env: EnvOrphans,
@@ -714,6 +778,8 @@ impl Sessions {
             home,
             claude,
             extra,
+            cpu: TreeCpu::default(),
+            stat: read_cpu_ticks,
             busy: BusyTracker::new(busy_window(tick)),
             tracker: OrphanTracker::default(),
             env: EnvOrphans::new(Pid::from_u32(std::process::id())),
@@ -738,6 +804,7 @@ impl Sessions {
                 }
             }
         }
+        self.cpu.update(&mut agents, now, self.stat);
         self.busy.update(&mut agents);
         let orphans = merge(
             self.tracker.update(procs, &agents),
@@ -1208,6 +1275,87 @@ mod tests {
         assert!(!agents[0].busy());
     }
 
+    /// A stat line whose utime, stime, cutime and cstime are `times`.
+    fn stat_line(comm: &str, [utime, stime, cutime, cstime]: [i64; 4]) -> String {
+        format!(
+            "42 ({comm}) S 1 42 42 0 -1 4194304 0 0 0 0 {utime} {stime} {cutime} {cstime} 20 0 1 0 100"
+        )
+    }
+
+    #[test]
+    fn cpu_ticks_add_own_and_reaped_time() {
+        assert_eq!(cpu_ticks(&stat_line("sh", [1, 2, 30, 40])), Some(73));
+        assert_eq!(cpu_ticks(&stat_line("a) b", [1, 2, 3, 4])), Some(10));
+        assert_eq!(cpu_ticks(&stat_line("sh", [1, 2, -3, 4])), Some(7));
+        assert_eq!(cpu_ticks("42 (sh) S 1 42"), None);
+    }
+
+    #[test]
+    fn reaped_child_time_reads_on_parent() {
+        // the outer sh reaps the inner one between its two reads of its stat
+        let burn = "i=0; while [ $i -lt 500000 ]; do i=$((i+1)); done";
+        let script = format!("cat /proc/$$/stat; sh -c '{burn}'; cat /proc/$$/stat");
+        let out = std::process::Command::new("sh")
+            .args(["-c", &script])
+            .output()
+            .unwrap();
+        let out = String::from_utf8(out.stdout).unwrap();
+        let ticks: Vec<u64> = out.lines().map(|l| cpu_ticks(l).unwrap()).collect();
+        // the loop took 45 ticks on WSL2
+        assert!(ticks[1] >= ticks[0] + 10, "{ticks:?}");
+    }
+
+    /// claude 10 with children `kids`, at 0 cpu in sysinfo, updated `secs`
+    /// after the epoch with each pid's clock ticks from `ticks`. Returns the
+    /// tree's cores.
+    fn tree_cores(cpu: &mut TreeCpu, kids: &[u32], secs: u64, ticks: &[(u32, u64)]) -> f32 {
+        let procs = std::iter::once(proc(10, 1, 100, "claude"))
+            .chain(kids.iter().map(|&k| proc(k, 10, 100, "sh")))
+            .collect();
+        let mut agents = scan(&procs, home(), &[], no_session);
+        let ticks: HashMap<Pid, u64> = ticks
+            .iter()
+            .map(|&(pid, t)| (Pid::from_u32(pid), t))
+            .collect();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+        cpu.update(&mut agents, now, |pid| ticks.get(&pid).copied());
+        cores(agents[0].cpu)
+    }
+
+    #[test]
+    fn child_exited_between_ticks_counts() {
+        let mut cpu = TreeCpu::default();
+        assert_eq!(tree_cores(&mut cpu, &[11], 0, &[(10, 100), (11, 50)]), 0.0);
+        // 11 ran 70 more ticks and exited, and a child that came and went
+        // between ticks ran 80; 10 reaped both
+        let reaped = 50 + 70 + 80;
+        assert_eq!(tree_cores(&mut cpu, &[], 2, &[(10, 100 + reaped)]), 0.75);
+    }
+
+    #[test]
+    fn member_reaped_outside_tree_reads_zero() {
+        let mut cpu = TreeCpu::default();
+        tree_cores(&mut cpu, &[11], 0, &[(10, 100), (11, 500)]);
+        // 11 was reparented away and its ticks left the tree
+        assert_eq!(tree_cores(&mut cpu, &[], 1, &[(10, 110)]), 0.0);
+        assert_eq!(tree_cores(&mut cpu, &[], 2, &[(10, 160)]), 0.5);
+    }
+
+    #[test]
+    fn tree_cpu_without_previous_ticks_keeps_sysinfo() {
+        let mut cpu = TreeCpu::default();
+        let at = |secs| SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+        let mut agents = session(10, 100, 0.4);
+        cpu.update(&mut agents, at(5), |_| Some(1000));
+        assert_eq!(agents[0].cpu, agents[0].procs[0].cpu);
+        // the clock went back
+        let mut agents = session(10, 100, 0.4);
+        cpu.update(&mut agents, at(1), |_| Some(2000));
+        assert_eq!(agents[0].cpu, agents[0].procs[0].cpu);
+        cpu.update(&mut [], at(2), |_| None);
+        assert!(cpu.prev.is_empty());
+    }
+
     /// A claude session in /home/u/code/hum at `cores`, whose session file
     /// reports `busy`.
     fn reporting(cores: f32, busy: Option<bool>) -> Vec<Agent> {
@@ -1493,6 +1641,7 @@ mod tests {
         );
         // the fake pids may be real processes on this machine
         sessions.environ = |_| None;
+        sessions.stat = |_| None;
         let procs = HashMap::from([in_dir(proc(10, 1, 100, "claude"), "/x/hum")]);
         let (agents, _) = sessions.observe(&procs, now);
         fs::remove_dir_all(&config).unwrap();
