@@ -140,24 +140,26 @@ struct Body {
 
 /// Where a section draws.
 enum Slot {
-    /// A box, or a part of a compact one, with `lines` data lines below a
-    /// header when `header`.
-    Rows {
-        area: Rect,
-        borders: Borders,
-        /// Opens with `├`, below another section in a compact box.
-        divider: bool,
-        header: bool,
-        lines: u16,
-    },
+    Rows(Rows),
     /// Folded into the bottom border of a compact box, see [`draw_footer`].
     Footer(Rect),
+}
+
+/// A box, or a part of a compact one, with `lines` data lines below a
+/// header when `header`.
+struct Rows {
+    area: Rect,
+    borders: Borders,
+    /// Opens with `├`, below another section in a compact box.
+    divider: bool,
+    header: bool,
+    lines: u16,
 }
 
 impl Slot {
     fn width(&self) -> u16 {
         match self {
-            Self::Rows { area, .. } | Self::Footer(area) => area.width,
+            Self::Rows(Rows { area, .. }) | Self::Footer(area) => area.width,
         }
     }
 }
@@ -182,7 +184,7 @@ impl Plan {
         };
         Lines {
             sections: slots.each_ref().map(|slot| match slot {
-                Slot::Rows { lines, .. } => Some(usize::from(*lines)),
+                Slot::Rows(rows) => Some(usize::from(rows.lines)),
                 Slot::Footer(_) => None,
             }),
             help_overflow: help.as_ref().map_or(0, |h| h.lines.len() - h.shown),
@@ -288,16 +290,9 @@ pub fn draw(
     ];
     for ((section, slot), window) in sections.into_iter().zip(slots).zip(windows) {
         match slot {
-            Slot::Rows {
-                area,
-                borders,
-                divider,
-                header,
-                ..
-            } => {
+            Slot::Rows(rows) => {
                 let shows = nav.shows(section.pane);
-                let block = block(borders, divider);
-                draw_section(frame, section, area, block, header, shows, window, theme);
+                draw_section(frame, section, rows, shows, window, theme);
             }
             Slot::Footer(area) => draw_footer(frame, section, area, theme),
         }
@@ -773,34 +768,39 @@ fn stack<const N: usize>(
         let inner = block(borders, divider).inner(area).height;
         // a single line goes to a row, not to a header with nothing under it
         let header = !compact && (inner >= 2 || rows[i] == 0);
-        Slot::Rows {
+        Slot::Rows(Rows {
             area,
             borders,
             divider,
             header,
             // an empty box squeezed to its borders has no line for it
             lines: inner.saturating_sub(u16::from(header)),
-        }
+        })
     })
 }
 
-/// `block` with the title and count in its top border and a dim frame,
-/// showing the rows of `window`. A last `+N more` line counts the rows
-/// below. When the section `shows` its cursor, its name takes the accent.
-#[allow(clippy::too_many_arguments)]
+/// The section's box at `at`, with the title and count in its top border
+/// and a dim frame, showing the rows of `window`. A last `+N more` line
+/// counts the rows below. When the section `shows` its cursor, its name
+/// takes the accent.
 fn draw_section(
     frame: &mut Frame,
     section: Section,
-    area: Rect,
-    block: Block,
-    header: bool,
+    at: Rows,
     shows: bool,
     window: &Window,
     theme: &Theme,
 ) {
+    let Rows {
+        area,
+        borders,
+        divider,
+        header,
+        ..
+    } = at;
     let mut title = title(&section, shows, theme);
     title.push(Span::styled(" ", theme.dim));
-    let block = block
+    let block = block(borders, divider)
         .border_style(theme.dim)
         .padding(Padding::horizontal(1))
         .title(Line::from(title));
@@ -1577,7 +1577,7 @@ mod tests {
         let area = Rect::new(0, 0, 74, 14);
         let slots = stack([30, 0, 0], [false; 3], area, false, false);
         for slot in &slots[1..] {
-            assert!(matches!(slot, Slot::Rows { lines: 0, .. }));
+            assert!(matches!(slot, Slot::Rows(Rows { lines: 0, .. })));
         }
     }
 
