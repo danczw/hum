@@ -114,8 +114,9 @@ pub struct Agent {
     /// The agent process first, then its descendants depth-first.
     pub procs: Vec<Proc>,
     /// Tree cpu in percent of one core, counting children that exited since
-    /// the last tick, see [`TreeCpu::update`]. Per-process rows count only
-    /// their own cpu, so their sum can fall short of this.
+    /// the last tick, see [`TreeCpu::update`]; sysinfo's sum over `procs`
+    /// until that has a value. Per-process rows count only their own cpu, so
+    /// their sum can fall short of this.
     pub cpu: f32,
     /// Tree cpu above [`BUSY_CORES`] over a full window, set by
     /// [`BusyTracker::update`].
@@ -715,15 +716,23 @@ fn read_cpu_ticks(pid: Pid) -> Option<u64> {
 /// tree member that reaps it, so the tree total carries it over.
 #[derive(Default)]
 pub struct TreeCpu {
-    /// (root pid, start time) -> tree ticks and when they were read.
-    prev: HashMap<Key, (u64, Instant)>,
+    /// (root pid, start time) -> its last whole read.
+    prev: HashMap<Key, TreeTicks>,
+}
+
+#[derive(Clone, Copy)]
+struct TreeTicks {
+    ticks: u64,
+    at: Instant,
+    /// The cpu last computed from a change in ticks; None before the first.
+    cpu: Option<f32>,
 }
 
 impl TreeCpu {
     /// Sets each agent's cpu from the change in its tree ticks since the last
-    /// whole read. A first sight or a member that can't be read keeps
-    /// sysinfo's sum. A member reaped outside the tree takes its ticks along,
-    /// which reads 0 for that tick rather than below.
+    /// whole read. A read that can't be used holds the last value, or
+    /// sysinfo's sum before the first: one with a member that can't be read,
+    /// or one whose ticks fell because a member left the tree with them.
     pub fn update(
         &mut self,
         agents: &mut [Agent],
@@ -734,17 +743,31 @@ impl TreeCpu {
         self.prev.retain(|root, _| roots.contains(root));
         for agent in agents {
             // Parents come before their children, so a child reaped between
-            // the two reads is in neither; skip such a read and diff the next
-            // one against the last whole read.
-            let Some(ticks) = agent.procs.iter().map(|p| read(p.pid)).sum::<Option<u64>>() else {
-                continue;
+            // the two reads is in neither; such a read is None and leaves the
+            // last whole one to diff the next against.
+            let ticks = agent.procs.iter().map(|p| read(p.pid)).sum::<Option<u64>>();
+            let last = self.prev.get(&agent.key()).copied();
+            let fresh = match (ticks, last) {
+                (Some(ticks), Some(last)) if ticks >= last.ticks => {
+                    let span = now.saturating_duration_since(last.at).as_secs_f64();
+                    let used = (ticks - last.ticks) as f64 / USER_HZ;
+                    (span > 0.0).then(|| (used / span * 100.0) as f32)
+                }
+                _ => None,
             };
-            let prev = self.prev.insert(agent.key(), (ticks, now));
-            let Some((before, then)) = prev else { continue };
-            let span = now.saturating_duration_since(then).as_secs_f64();
-            if span > 0.0 {
-                let used = ticks.saturating_sub(before) as f64 / USER_HZ;
-                agent.cpu = (used / span * 100.0) as f32;
+            let cpu = fresh.or(last.and_then(|l| l.cpu));
+            if let Some(cpu) = cpu {
+                agent.cpu = cpu;
+            }
+            if let Some(ticks) = ticks {
+                self.prev.insert(
+                    agent.key(),
+                    TreeTicks {
+                        ticks,
+                        at: now,
+                        cpu,
+                    },
+                );
             }
         }
     }
@@ -788,18 +811,17 @@ impl Sessions {
         }
     }
 
-    /// `now` dates subagent transcripts; `tick` times tree cpu, see
-    /// [`TreeCpu::update`].
     pub fn observe(
         &mut self,
         procs: &HashMap<Pid, ProcInfo>,
         now: SystemTime,
-        tick: Instant,
     ) -> (Vec<Agent>, Vec<Orphan>) {
         let (home, claude) = (self.home.as_deref(), self.claude.as_deref());
         let mut agents = scan(procs, home, &self.extra, |pid| {
             claude::read_session(claude?, pid)
         });
+        // before the subagent reads, so fewer members exit since the snapshot
+        self.cpu.update(&mut agents, Instant::now(), self.stat);
         if let Some(claude) = claude {
             for agent in &mut agents {
                 if let Some(id) = &agent.session_id {
@@ -808,7 +830,6 @@ impl Sessions {
                 }
             }
         }
-        self.cpu.update(&mut agents, tick, self.stat);
         self.busy.update(&mut agents);
         let orphans = merge(
             self.tracker.update(procs, &agents),
@@ -1348,21 +1369,31 @@ mod tests {
     }
 
     #[test]
-    fn child_reaped_between_reads_skips_the_sample() {
+    fn child_reaped_between_reads_holds_last_value() {
         let mut cpu = TreeCpu::default();
         tree_cores(&mut cpu, &[11], 0, &[(10, 100), (11, 6000)]);
+        assert_eq!(
+            tree_cores(&mut cpu, &[11], 1, &[(10, 150), (11, 6000)]),
+            0.5
+        );
         // 10 was read before it reaped 11, and 11 was gone when read
-        assert_eq!(tree_cores(&mut cpu, &[11], 1, &[(10, 100)]), 0.2);
-        assert_eq!(tree_cores(&mut cpu, &[], 2, &[(10, 100 + 6000 + 100)]), 0.5);
+        assert_eq!(tree_cores(&mut cpu, &[11], 2, &[(10, 150)]), 0.5);
+        // diffed against the read at 1
+        let reaped = 6000 + 50;
+        assert_eq!(
+            tree_cores(&mut cpu, &[], 3, &[(10, 150 + reaped + 150)]),
+            1.0
+        );
     }
 
     #[test]
-    fn member_reaped_outside_tree_reads_zero() {
+    fn member_leaving_tree_holds_last_value() {
         let mut cpu = TreeCpu::default();
         tree_cores(&mut cpu, &[11], 0, &[(10, 100), (11, 500)]);
-        // 11 was reparented away and its ticks left the tree
-        assert_eq!(tree_cores(&mut cpu, &[], 1, &[(10, 110)]), 0.0);
-        assert_eq!(tree_cores(&mut cpu, &[], 2, &[(10, 160)]), 0.5);
+        assert_eq!(tree_cores(&mut cpu, &[11], 1, &[(10, 150), (11, 550)]), 1.0);
+        // 11 was reparented away and took its ticks along
+        assert_eq!(tree_cores(&mut cpu, &[], 2, &[(10, 160)]), 1.0);
+        assert_eq!(tree_cores(&mut cpu, &[], 3, &[(10, 210)]), 0.5);
     }
 
     #[test]
@@ -1662,7 +1693,7 @@ mod tests {
         sessions.environ = |_| None;
         sessions.stat = |_| None;
         let procs = HashMap::from([in_dir(proc(10, 1, 100, "claude"), "/x/hum")]);
-        let (agents, _) = sessions.observe(&procs, now, Instant::now());
+        let (agents, _) = sessions.observe(&procs, now);
         fs::remove_dir_all(&config).unwrap();
         assert_eq!(agents[0].reported, Some(false));
         assert_eq!(agents[0].subagents.len(), 1);
