@@ -323,9 +323,10 @@ pub mod fixture {
     impl SessionFile {
         /// The file as Claude Code writes it.
         pub fn json(&self) -> String {
+            let quote = |s: &str| format!(r#""{}""#, s.replace('\\', r"\\").replace('"', r#"\""#));
             let mut fields = Vec::new();
             if let Some(cwd) = &self.cwd {
-                fields.push(format!(r#""cwd":"{}""#, cwd.display()));
+                fields.push(format!(r#""cwd":{}"#, quote(&cwd.to_string_lossy())));
             }
             if let Some(busy) = self.busy {
                 let status = if busy { "busy" } else { "idle" };
@@ -340,10 +341,21 @@ pub mod fixture {
                 None => None,
             };
             if let Some((name, source)) = name {
-                fields.push(format!(r#""name":"{name}","nameSource":"{source}""#));
+                fields.push(format!(r#""name":{},"nameSource":"{source}""#, quote(name)));
             }
             format!("{{{}}}", fields.join(","))
         }
+    }
+
+    #[test]
+    fn json_round_trips_through_parse() {
+        let file = SessionFile {
+            cwd: Some(PathBuf::from(r"/x/a\b")),
+            busy: Some(true),
+            id: Some(SessionId("5e55".into())),
+            name: Some(Name::Given(r#"new "one"\ é"#.into())),
+        };
+        assert_eq!(SessionFile::parse(&file.json()), file);
     }
 }
 
