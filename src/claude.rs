@@ -103,9 +103,9 @@ fn same_process(file: &str, stat: impl FnOnce() -> Option<String>) -> bool {
     stat().is_some_and(|stat| stat_field(&stat, 22).is_some_and(|t| t.parse() == Ok(start)))
 }
 
-/// Field `n` of a `/proc/<pid>/stat` line, numbered from 1 as in proc(5).
-/// The comm in field 2 may hold spaces and `)`, so fields 3 on are counted
-/// from the last `)`.
+/// Field `n` of a `/proc/<pid>/stat` line, numbered from 1 as in proc(5),
+/// for `n` of 3 on; None below. The comm in field 2 may hold spaces and `)`,
+/// so fields are counted from the last `)`.
 pub fn stat_field(stat: &str, n: usize) -> Option<&str> {
     let (_, rest) = stat.rsplit_once(')')?;
     rest.split_whitespace().nth(n.checked_sub(3)?)
