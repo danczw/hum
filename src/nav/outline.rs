@@ -1,16 +1,15 @@
 use std::collections::HashSet;
-use std::hash::{DefaultHasher, Hash, Hasher};
 
-use crate::agents::{Agent, Proc};
+use super::Key;
+use crate::agents::{Agent, Proc, ProcKey};
 use crate::claude::Subagent;
-use crate::focus::{Key, key};
 
 /// The agents section as rows: each agent, and below an open one its
 /// subagents and processes. Only open roots are kept, so a new session
 /// starts collapsed.
 #[derive(Default)]
 pub struct Outline {
-    open: HashSet<Key>,
+    open: HashSet<ProcKey>,
 }
 
 /// One row of the agents section and the key the cursor finds it by.
@@ -37,10 +36,10 @@ impl Outline {
     pub fn rows<'a>(&self, agents: &'a [Agent]) -> Vec<Entry<'a>> {
         let mut rows = Vec::new();
         for agent in agents {
-            let root = key(agent.key());
+            let root = agent.key();
             let open = self.open.contains(&root);
             rows.push(Entry {
-                key: root,
+                key: Key::Proc(root),
                 line: Line::Root { agent, open },
             });
             if !open {
@@ -50,11 +49,11 @@ impl Outline {
             // them out of a short pane. One level deep: a meta file does not
             // name the subagent that started it.
             rows.extend(agent.subagents.iter().map(|s| Entry {
-                key: subagent_key(&s.id),
+                key: Key::Subagent(s.id.clone()),
                 line: Line::Subagent(s),
             }));
             rows.extend(agent.procs[1..].iter().map(|p| Entry {
-                key: key(p.key()),
+                key: Key::Proc(p.key()),
                 line: Line::Proc(p),
             }));
         }
@@ -63,11 +62,11 @@ impl Outline {
 
     /// Expands or collapses the tree holding row `at`. Returns where the
     /// cursor goes when `at` no longer shows or the key moves it.
-    pub fn fold(&mut self, agents: &[Agent], at: Key, fold: Fold) -> Option<Key> {
+    pub fn fold(&mut self, agents: &[Agent], at: &Key, fold: Fold) -> Option<Key> {
         let agent = tree_of(agents, at)?;
-        let root = key(agent.key());
+        let root = agent.key();
         match fold {
-            Fold::Collapse if at != root => return Some(root),
+            Fold::Collapse if *at != Key::Proc(root) => return Some(Key::Proc(root)),
             // kept closed, so children spawned later start collapsed
             _ if !agent.has_children() => {}
             Fold::Toggle => {
@@ -89,31 +88,29 @@ impl Outline {
     /// children spawned later start collapsed. Returns the root of `at` when
     /// its tree is closed: after `collapse_all`, or when the tree lost its
     /// children or `at` now sits under another root.
-    pub fn sync(&mut self, agents: &[Agent], at: Option<Key>) -> Option<Key> {
-        let roots: HashSet<Key> = agents
+    pub fn sync(&mut self, agents: &[Agent], at: Option<&Key>) -> Option<Key> {
+        let roots: HashSet<ProcKey> = agents
             .iter()
             .filter(|a| a.has_children())
-            .map(|a| key(a.key()))
+            .map(Agent::key)
             .collect();
         self.open.retain(|k| roots.contains(k));
         let at = at?;
-        self.hidden(at, key(tree_of(agents, at)?.key()))
+        self.hidden(at, tree_of(agents, at)?.key())
     }
 
     /// `root` when the row `at` below it sits in a closed tree.
-    fn hidden(&self, at: Key, root: Key) -> Option<Key> {
-        (at != root && !self.open.contains(&root)).then_some(root)
+    fn hidden(&self, at: &Key, root: ProcKey) -> Option<Key> {
+        let open = self.open.contains(&root);
+        let root = Key::Proc(root);
+        (*at != root && !open).then_some(root)
     }
 
     /// Childless roots stay closed, so children spawned later start
     /// collapsed.
     pub fn expand_all(&mut self, agents: &[Agent]) {
-        self.open.extend(
-            agents
-                .iter()
-                .filter(|a| a.has_children())
-                .map(|a| key(a.key())),
-        );
+        self.open
+            .extend(agents.iter().filter(|a| a.has_children()).map(Agent::key));
     }
 
     pub fn collapse_all(&mut self) {
@@ -121,19 +118,12 @@ impl Outline {
     }
 }
 
-/// `(u64::MAX, hash of the id)`: no pid reaches `u64::MAX`, so it never
-/// names a process.
-fn subagent_key(id: &str) -> Key {
-    let mut hasher = DefaultHasher::new();
-    id.hash(&mut hasher);
-    (u64::MAX, hasher.finish())
-}
-
 /// The session whose tree holds the process or subagent `of`.
-fn tree_of(agents: &[Agent], of: Key) -> Option<&Agent> {
-    agents.iter().find(|a| {
-        a.procs.iter().any(|p| key(p.key()) == of)
-            || a.subagents.iter().any(|s| subagent_key(&s.id) == of)
+fn tree_of<'a>(agents: &'a [Agent], of: &Key) -> Option<&'a Agent> {
+    agents.iter().find(|a| match of {
+        Key::Proc(p) => a.holds(*p),
+        Key::Subagent(id) => a.subagents.iter().any(|s| s.id == *id),
+        Key::Port { .. } => false,
     })
 }
 
@@ -142,7 +132,6 @@ mod tests {
     use sysinfo::Pid;
 
     use super::*;
-    use crate::agents::ProcKey;
 
     /// A session per root pid, each with one child at `root + 1`.
     fn agents(roots: &[u32]) -> Vec<Agent> {
@@ -171,7 +160,7 @@ mod tests {
     }
 
     fn pid(pid: u32) -> Key {
-        key(ProcKey {
+        Key::Proc(ProcKey {
             pid: Pid::from_u32(pid),
             start: 7,
         })
@@ -275,9 +264,9 @@ mod tests {
     fn toggle_flips_one_tree() {
         let mut outline = Outline::default();
         let now = agents(&[10, 20]);
-        assert_eq!(outline.fold(&now, pid(10), Fold::Toggle), None);
+        assert_eq!(outline.fold(&now, &pid(10), Fold::Toggle), None);
         assert_eq!(rows(&outline, &now), ["10", "11", "20"]);
-        assert_eq!(outline.fold(&now, pid(10), Fold::Toggle), None);
+        assert_eq!(outline.fold(&now, &pid(10), Fold::Toggle), None);
         assert_eq!(rows(&outline, &now), ["10", "20"]);
     }
 
@@ -285,10 +274,10 @@ mod tests {
     fn expand_and_collapse_on_a_root_keep_the_cursor() {
         let mut outline = Outline::default();
         let now = agents(&[10]);
-        assert_eq!(outline.fold(&now, pid(10), Fold::Expand), None);
-        assert_eq!(outline.fold(&now, pid(10), Fold::Expand), None);
+        assert_eq!(outline.fold(&now, &pid(10), Fold::Expand), None);
+        assert_eq!(outline.fold(&now, &pid(10), Fold::Expand), None);
         assert_eq!(rows(&outline, &now), ["10", "11"]);
-        assert_eq!(outline.fold(&now, pid(10), Fold::Collapse), None);
+        assert_eq!(outline.fold(&now, &pid(10), Fold::Collapse), None);
         assert_eq!(rows(&outline, &now), ["10"]);
     }
 
@@ -297,7 +286,7 @@ mod tests {
         let mut outline = Outline::default();
         let mut now = agents(&[10]);
         now[0].procs.truncate(1);
-        outline.fold(&now, pid(10), Fold::Toggle);
+        outline.fold(&now, &pid(10), Fold::Toggle);
         // a child spawns later: it starts collapsed
         assert_eq!(rows(&outline, &agents(&[10])), ["10"]);
     }
@@ -307,7 +296,7 @@ mod tests {
         let mut outline = Outline::default();
         let now = agents(&[10, 20]);
         outline.expand_all(&now);
-        assert_eq!(outline.fold(&now, pid(21), Fold::Collapse), Some(pid(20)));
+        assert_eq!(outline.fold(&now, &pid(21), Fold::Collapse), Some(pid(20)));
         assert_eq!(rows(&outline, &now), ["10", "11", "20", "21"]);
     }
 
@@ -317,9 +306,12 @@ mod tests {
         let mut now = agents(&[10, 20]);
         now[1].subagents.push(subagent("a1"));
         outline.expand_all(&now);
-        let a1 = subagent_key("a1");
-        assert_eq!(outline.fold(&now, a1, Fold::Collapse), Some(pid(20)));
-        assert_eq!(outline.fold(&now, subagent_key("a2"), Fold::Collapse), None);
+        let a1 = Key::Subagent("a1".into());
+        assert_eq!(outline.fold(&now, &a1, Fold::Collapse), Some(pid(20)));
+        assert_eq!(
+            outline.fold(&now, &Key::Subagent("a2".into()), Fold::Collapse),
+            None
+        );
     }
 
     #[test]
@@ -327,7 +319,7 @@ mod tests {
         let mut outline = Outline::default();
         let now = agents(&[10, 20]);
         outline.expand_all(&now);
-        assert_eq!(outline.fold(&now, pid(11), Fold::Toggle), Some(pid(10)));
+        assert_eq!(outline.fold(&now, &pid(11), Fold::Toggle), Some(pid(10)));
         assert_eq!(rows(&outline, &now), ["10", "20", "21"]);
     }
 
@@ -336,7 +328,7 @@ mod tests {
         let mut outline = Outline::default();
         let now = agents(&[10]);
         outline.expand_all(&now);
-        assert_eq!(outline.fold(&now, pid(11), Fold::Expand), None);
+        assert_eq!(outline.fold(&now, &pid(11), Fold::Expand), None);
     }
 
     #[test]
@@ -344,11 +336,11 @@ mod tests {
         let mut outline = Outline::default();
         let now = agents(&[10]);
         // pid 11 with another start time is not this session's child
-        let stranger = key(ProcKey {
+        let stranger = Key::Proc(ProcKey {
             pid: Pid::from_u32(11),
             start: 8,
         });
-        assert_eq!(outline.fold(&now, stranger, Fold::Toggle), None);
+        assert_eq!(outline.fold(&now, &stranger, Fold::Toggle), None);
         assert_eq!(rows(&outline, &now), ["10"]);
     }
 
@@ -357,21 +349,21 @@ mod tests {
         let mut outline = Outline::default();
         let now = agents(&[10, 20]);
         outline.expand_all(&now);
-        assert_eq!(outline.sync(&now, Some(pid(21))), None);
+        assert_eq!(outline.sync(&now, Some(&pid(21))), None);
         outline.collapse_all();
-        assert_eq!(outline.sync(&now, Some(pid(21))), Some(pid(20)));
-        assert_eq!(outline.sync(&now, Some(pid(20))), None);
+        assert_eq!(outline.sync(&now, Some(&pid(21))), Some(pid(20)));
+        assert_eq!(outline.sync(&now, Some(&pid(20))), None);
         assert_eq!(outline.sync(&now, None), None);
     }
 
     #[test]
     fn open_trees_stay_open_across_ticks() {
         let mut outline = Outline::default();
-        outline.fold(&agents(&[10, 20]), pid(10), Fold::Toggle);
+        outline.fold(&agents(&[10, 20]), &pid(10), Fold::Toggle);
         for _ in 0..3 {
-            outline.sync(&agents(&[10, 20]), Some(pid(10)));
+            outline.sync(&agents(&[10, 20]), Some(&pid(10)));
         }
-        outline.fold(&agents(&[10, 20]), pid(20), Fold::Expand);
+        outline.fold(&agents(&[10, 20]), &pid(20), Fold::Expand);
         assert_eq!(rows(&outline, &agents(&[10, 20])), ["10", "11", "20", "21"]);
     }
 }
