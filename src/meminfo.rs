@@ -45,7 +45,7 @@ mod tests {
 
     const MIB: u64 = 1024 * 1024;
 
-    // Trimmed from a 6.x kernel with zswap on.
+    // Round sizes so the sums read in MiB; Zswap is the compressed size, not subtracted.
     const MEMINFO: &str = "\
 MemTotal:       32617072 kB
 MemFree:         1203424 kB
