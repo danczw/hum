@@ -214,7 +214,7 @@ jobs:
             -c user.name='github-actions[bot]' \
             -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
             commit -m "hum $VERSION"
-      - uses: Homebrew/actions/setup-homebrew@ceec4e8419bb3c97ce96e9dda7738499ed5f869d # 2026.11.14.1
+      - uses: Homebrew/actions/setup-homebrew@61b401267256bb9c047d6d1481b176d5772a0ba7 # 2026.11.23.1
       # Tap the local checkout so the formula is tested before it is pushed.
       - run: |
           brew tap danczw/tap "$PWD/tap"
