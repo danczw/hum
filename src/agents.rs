@@ -177,13 +177,14 @@ impl Agent {
 }
 
 /// `extra` holds the names added with `--agent`, matched after [`AGENTS`].
-/// `read_session` returns a claude pid's session file, see
+/// Claude sessions read their file from `claude`, see
 /// [`claude::read_session`].
 pub fn scan(
     procs: &HashMap<Pid, ProcInfo>,
     home: Option<&Path>,
     extra: &[&'static str],
-    mut read_session: impl FnMut(Pid) -> Option<SessionFile>,
+    claude: Option<&Path>,
+    host: &impl Host,
 ) -> Vec<Agent> {
     let mut children: HashMap<Pid, Vec<Pid>> = HashMap::new();
     for p in procs.values() {
@@ -231,7 +232,7 @@ pub fn scan(
     agents.sort_by_key(|a| (a.root().start, a.root().pid));
     let files: Vec<Option<SessionFile>> = agents
         .iter()
-        .map(|a| session_file(&procs[&a.root().pid], a.kind, &mut read_session))
+        .map(|a| session_file(&procs[&a.root().pid], a.kind, claude, host))
         .collect();
     name_sessions(procs, &mut agents, &files);
     for (agent, file) in agents.iter_mut().zip(files) {
@@ -303,10 +304,11 @@ fn name_sessions(
 fn session_file(
     info: &ProcInfo,
     kind: &str,
-    read_session: impl FnOnce(Pid) -> Option<SessionFile>,
+    claude: Option<&Path>,
+    host: &impl Host,
 ) -> Option<SessionFile> {
     (kind == "claude")
-        .then(|| read_session(info.pid))
+        .then(|| claude::read_session(claude?, info.pid, host))
         .flatten()
         .filter(|f| f.cwd.is_some() && f.cwd.as_deref() == info.cwd.as_deref())
 }
@@ -792,16 +794,14 @@ impl<H: Host> Sessions<H> {
         now: SystemTime,
     ) -> (Vec<Agent>, Vec<Orphan>) {
         let (home, claude) = (self.home.as_deref(), self.claude.as_deref());
-        let mut agents = scan(procs, home, &self.extra, |pid| {
-            claude::read_session(claude?, pid, &self.host)
-        });
+        let mut agents = scan(procs, home, &self.extra, claude, &self.host);
         // before the subagent reads, so fewer members exit since the snapshot
         self.cpu.update(&mut agents, Instant::now(), &self.host);
         if let Some(claude) = claude {
             for agent in &mut agents {
                 if let Some(id) = &agent.session_id {
                     let cwd = procs[&agent.root().pid].cwd.as_deref();
-                    agent.subagents = claude::running_subagents(claude, cwd, id, now);
+                    agent.subagents = claude::running_subagents(claude, cwd, id, now, &self.host);
                 }
             }
         }
@@ -852,10 +852,6 @@ mod tests {
     fn in_dir((pid, mut info): (Pid, ProcInfo), cwd: &str) -> (Pid, ProcInfo) {
         info.cwd = Some(PathBuf::from(cwd));
         (pid, info)
-    }
-
-    fn no_session(_: Pid) -> Option<SessionFile> {
-        None
     }
 
     fn home() -> Option<&'static Path> {
@@ -932,7 +928,7 @@ mod tests {
             proc(11, 10, 101, "bash"),
             proc(12, 11, 102, "codex"),
         ]);
-        let agents = scan(&procs, home(), &[], no_session);
+        let agents = scan(&procs, home(), &[], None, &MemHost::default());
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0].kind, "claude");
         let tree: Vec<(u32, usize)> = agents[0]
@@ -955,7 +951,7 @@ mod tests {
             proc(600, 500, 600, "bash"),
             proc(700, 600, 700, "vite"),
         ]);
-        let agents = scan(&procs, home(), &[], no_session);
+        let agents = scan(&procs, home(), &[], None, &MemHost::default());
         let tree: Vec<u32> = agents[0].procs.iter().map(|p| p.pid.as_u32()).collect();
         assert_eq!(tree, [100, 200, 300]);
         assert_eq!(pids(&env_orphans(&procs, &[700], 400)), [700]);
@@ -968,7 +964,7 @@ mod tests {
             (pid, info)
         };
         let roots = |procs: HashMap<Pid, ProcInfo>| -> Vec<u32> {
-            scan(&procs, home(), &[], no_session)
+            scan(&procs, home(), &[], None, &MemHost::default())
                 .iter()
                 .map(|a| a.root().pid.as_u32())
                 .collect()
@@ -993,7 +989,7 @@ mod tests {
             in_dir(proc(20, 1, 200, "claude"), "/home/u/code/b"),
             proc(30, 1, 300, "codex"),
         ]);
-        let projects: Vec<String> = scan(&procs, home(), &[], no_session)
+        let projects: Vec<String> = scan(&procs, home(), &[], None, &MemHost::default())
             .into_iter()
             .map(|a| a.project)
             .collect();
@@ -1006,12 +1002,18 @@ mod tests {
         let procs = HashMap::from([proc(10, 1, 100, "claude"), proc(11, 10, 101, "vite")]);
         assert!(
             tracker
-                .update(&procs, &scan(&procs, home(), &[], no_session))
+                .update(
+                    &procs,
+                    &scan(&procs, home(), &[], None, &MemHost::default())
+                )
                 .is_empty()
         );
 
         let procs = HashMap::from([proc(11, 1, 101, "vite")]);
-        let orphans = tracker.update(&procs, &scan(&procs, home(), &[], no_session));
+        let orphans = tracker.update(
+            &procs,
+            &scan(&procs, home(), &[], None, &MemHost::default()),
+        );
         assert_eq!(pids(&orphans), [11]);
         assert_eq!(orphans[0].from.to_string(), "claude/?");
     }
@@ -1023,10 +1025,16 @@ mod tests {
             in_dir(proc(10, 1, 100, "claude"), "/home/u/code/a"),
             proc(11, 10, 101, "vite"),
         ]);
-        tracker.update(&procs, &scan(&procs, home(), &[], no_session));
+        tracker.update(
+            &procs,
+            &scan(&procs, home(), &[], None, &MemHost::default()),
+        );
 
         let procs = HashMap::from([proc(11, 1, 101, "vite")]);
-        let orphans = tracker.update(&procs, &scan(&procs, home(), &[], no_session));
+        let orphans = tracker.update(
+            &procs,
+            &scan(&procs, home(), &[], None, &MemHost::default()),
+        );
         assert_eq!(orphans[0].from.to_string(), "claude/a");
     }
 
@@ -1034,12 +1042,18 @@ mod tests {
     fn reused_pid_is_not_orphan() {
         let mut tracker = OrphanTracker::default();
         let procs = HashMap::from([proc(10, 1, 100, "claude"), proc(11, 10, 101, "vite")]);
-        tracker.update(&procs, &scan(&procs, home(), &[], no_session));
+        tracker.update(
+            &procs,
+            &scan(&procs, home(), &[], None, &MemHost::default()),
+        );
 
         let procs = HashMap::from([proc(11, 1, 500, "vite")]);
         assert!(
             tracker
-                .update(&procs, &scan(&procs, home(), &[], no_session))
+                .update(
+                    &procs,
+                    &scan(&procs, home(), &[], None, &MemHost::default())
+                )
                 .is_empty()
         );
     }
@@ -1053,10 +1067,13 @@ mod tests {
             proc(11, 10, 101, "bash"),
             proc(12, 11, 102, "codex"),
         ]);
-        tracker.update(&procs, &scan(&procs, home(), &[], no_session));
+        tracker.update(
+            &procs,
+            &scan(&procs, home(), &[], None, &MemHost::default()),
+        );
 
         let procs = HashMap::from([proc(11, 1, 101, "bash"), proc(12, 11, 102, "codex")]);
-        let agents = scan(&procs, home(), &[], no_session);
+        let agents = scan(&procs, home(), &[], None, &MemHost::default());
         assert_eq!(agents[0].root().pid.as_u32(), 12);
         assert_eq!(pids(&tracker.update(&procs, &agents)), [11]);
     }
@@ -1079,7 +1096,7 @@ mod tests {
         };
         env.update(
             procs,
-            &scan(procs, home(), &[], no_session),
+            &scan(procs, home(), &[], None, &MemHost::default()),
             home(),
             &[],
             &host,
@@ -1161,7 +1178,7 @@ mod tests {
             ..MemHost::default()
         };
         let tick = |env: &mut EnvOrphans, procs: &HashMap<Pid, ProcInfo>| {
-            let agents = scan(procs, home(), &[], no_session);
+            let agents = scan(procs, home(), &[], None, &MemHost::default());
             env.update(procs, &agents, home(), &[], &host);
         };
         let procs = HashMap::from([
@@ -1210,10 +1227,13 @@ mod tests {
             proc(11, 10, 101, "vite"),
             proc(12, 10, 102, "tail"),
         ]);
-        tracker.update(&procs, &scan(&procs, home(), &[], no_session));
+        tracker.update(
+            &procs,
+            &scan(&procs, home(), &[], None, &MemHost::default()),
+        );
         let mut procs = procs;
         procs.extend([proc(12, 1, 102, "tail")]);
-        let agents = scan(&procs, home(), &[], no_session);
+        let agents = scan(&procs, home(), &[], None, &MemHost::default());
         let orphans = tracker.update(&procs, &agents);
 
         let owner = |pid, start| owner(&agents, &orphans, Pid::from_u32(pid), start);
@@ -1231,7 +1251,13 @@ mod tests {
     fn session(pid: u32, start: u64, cores: f32) -> Vec<Agent> {
         let (pid, mut info) = proc(pid, 1, start, "claude");
         info.cpu = cores * 100.0;
-        scan(&HashMap::from([(pid, info)]), home(), &[], no_session)
+        scan(
+            &HashMap::from([(pid, info)]),
+            home(),
+            &[],
+            None,
+            &MemHost::default(),
+        )
     }
 
     const WINDOW: usize = 5;
@@ -1313,7 +1339,7 @@ mod tests {
         let procs = std::iter::once((pid, root))
             .chain(kids.iter().map(|&k| proc(k, 10, 100, "sh")))
             .collect();
-        let mut agents = scan(&procs, home(), &[], no_session);
+        let mut agents = scan(&procs, home(), &[], None, &MemHost::default());
         let mut host = MemHost::default();
         for &(pid, t) in ticks {
             host.cpu(pid, t);
@@ -1382,7 +1408,8 @@ mod tests {
             &HashMap::from([(pid, info)]),
             home(),
             &[],
-            files(&[(10, file)]),
+            claude(),
+            &files(&[(10, file)]),
         )
     }
 
@@ -1424,15 +1451,25 @@ mod tests {
             &HashMap::from([(pid, info)]),
             home(),
             &[],
-            files(&[(10, file)]),
+            claude(),
+            &files(&[(10, file)]),
         );
         assert_eq!(agents[0].reported, None);
     }
 
-    /// Session files by pid, as [`claude::read_session`] returns them.
-    fn files(files: &[(u32, SessionFile)]) -> impl FnMut(Pid) -> Option<SessionFile> {
-        let files: HashMap<u32, SessionFile> = files.iter().cloned().collect();
-        move |pid| files.get(&pid.as_u32()).cloned()
+    /// The config dir [`files`] writes to.
+    fn claude() -> Option<&'static Path> {
+        Some(Path::new(fixture::CONFIG))
+    }
+
+    /// A host holding a session file per pid.
+    fn files(files: &[(u32, SessionFile)]) -> MemHost {
+        let mut host = MemHost::default();
+        for (pid, file) in files {
+            let path = format!("{}/sessions/{pid}.json", fixture::CONFIG);
+            host.file(path, &file.json(), fixture::now());
+        }
+        host
     }
 
     /// A session file naming only `cwd`.
@@ -1483,7 +1520,7 @@ mod tests {
             in_dir(proc(20, 1, 200, "codex"), "/home/u/code/a"),
         ]);
         let gate = given("gate", "/home/u/code/a");
-        let agents = scan(&procs, home(), &[], files(&[(10, gate)]));
+        let agents = scan(&procs, home(), &[], claude(), &files(&[(10, gate)]));
         assert_eq!(labels(&agents), ["claude/a", "codex/a"]);
     }
 
@@ -1493,7 +1530,8 @@ mod tests {
             &hum_trio(),
             home(),
             &[],
-            files(&[
+            claude(),
+            &files(&[
                 (10, given("gate", HUM)),
                 (20, given("exec", HUM)),
                 (30, given("watch", HUM)),
@@ -1517,7 +1555,8 @@ mod tests {
             &procs,
             home(),
             &[],
-            files(&[
+            claude(),
+            &files(&[
                 (10, derived("hum-x", HUM)),
                 (30, derived("hum-fix-ci", HUM)),
             ]),
@@ -1535,7 +1574,8 @@ mod tests {
             &hum_trio(),
             home(),
             &[],
-            files(&[(20, given("gate", HUM)), (30, empty)]),
+            claude(),
+            &files(&[(20, given("gate", HUM)), (30, empty)]),
         );
         assert_eq!(
             labels(&agents),
@@ -1547,7 +1587,7 @@ mod tests {
     fn rank_follows_start_time_not_pid() {
         let mut procs = hum_trio();
         procs.get_mut(&Pid::from_u32(10)).unwrap().start = 400;
-        let agents = scan(&procs, home(), &[], no_session);
+        let agents = scan(&procs, home(), &[], None, &MemHost::default());
         assert_eq!(
             labels(&agents),
             ["claude/hum·3", "claude/hum·1", "claude/hum·2"]
@@ -1561,7 +1601,8 @@ mod tests {
             &hum_trio(),
             home(),
             &[],
-            files(&[(10, gate.clone()), (20, gate), (30, given("watch", HUM))]),
+            claude(),
+            &files(&[(10, gate.clone()), (20, gate), (30, given("watch", HUM))]),
         );
         assert_eq!(
             labels(&agents),
@@ -1573,7 +1614,7 @@ mod tests {
     fn file_of_other_cwd_is_ignored() {
         // pid 10's file is left from an earlier session in another dir
         let stale = given("gate", "/home/u/code/other");
-        let agents = scan(&hum_trio(), home(), &[], files(&[(10, stale)]));
+        let agents = scan(&hum_trio(), home(), &[], claude(), &files(&[(10, stale)]));
         assert_eq!(labels(&agents)[0], "claude/hum·1");
     }
 
@@ -1582,7 +1623,13 @@ mod tests {
         let mut procs = hum_trio();
         procs.get_mut(&Pid::from_u32(10)).unwrap().cmd =
             ["claude", "--name", "gate"].map(OsString::from).to_vec();
-        let agents = scan(&procs, home(), &[], files(&[(10, at(HUM)), (20, at(HUM))]));
+        let agents = scan(
+            &procs,
+            home(),
+            &[],
+            claude(),
+            &files(&[(10, at(HUM)), (20, at(HUM))]),
+        );
         assert_eq!(
             labels(&agents),
             ["claude/hum·gate", "claude/hum·2", "claude/hum·3"]
@@ -1596,7 +1643,8 @@ mod tests {
             &hum_trio(),
             home(),
             &[],
-            files(&[(10, derived("hum-3", HUM))]),
+            claude(),
+            &files(&[(10, derived("hum-3", HUM))]),
         );
         assert_eq!(
             labels(&agents),
@@ -1606,7 +1654,8 @@ mod tests {
             &hum_trio(),
             home(),
             &[],
-            files(&[(10, derived("hum-33", HUM))]),
+            claude(),
+            &files(&[(10, derived("hum-33", HUM))]),
         );
         assert_eq!(labels(&agents)[0], "claude/hum·33");
     }
@@ -1623,7 +1672,13 @@ mod tests {
     fn env_orphan_takes_root_session_name() {
         let mut procs = hum_trio();
         procs.extend([proc(11, 1, 101, "tail")]);
-        let agents = scan(&procs, home(), &[], files(&[(10, given("gate", HUM))]));
+        let agents = scan(
+            &procs,
+            home(),
+            &[],
+            claude(),
+            &files(&[(10, given("gate", HUM))]),
+        );
         let mut env = EnvOrphans::new(Pid::from_u32(99));
         let host = MemHost {
             environs: HashMap::from([(Pid::from_u32(11), environ(&["CLAUDE_PID=10"]))]),
@@ -1638,29 +1693,38 @@ mod tests {
         let mut tracker = OrphanTracker::default();
         let mut procs = hum_trio();
         procs.extend([proc(21, 20, 201, "vite")]);
-        let agents = scan(&procs, home(), &[], files(&[(20, given("exec", HUM))]));
+        let agents = scan(
+            &procs,
+            home(),
+            &[],
+            claude(),
+            &files(&[(20, given("exec", HUM))]),
+        );
         tracker.update(&procs, &agents);
 
         procs.remove(&Pid::from_u32(20));
         procs.extend([proc(21, 1, 201, "vite")]);
-        let orphans = tracker.update(&procs, &scan(&procs, home(), &[], no_session));
+        let orphans = tracker.update(
+            &procs,
+            &scan(&procs, home(), &[], None, &MemHost::default()),
+        );
         assert_eq!(orphans[0].from.to_string(), "claude/hum·exec");
     }
 
     #[test]
     fn running_subagent_makes_an_idle_session_busy() {
-        let (config, now) = fixture::idle_with_subagent("observe", 10);
-        let home = home().map(Path::to_path_buf);
+        let mut host = MemHost::default();
+        fixture::session(&mut host, 10, "idle");
+        fixture::subagents(&mut host, &[("a1", r#"{"agentType":"Explore"}"#, 0)]);
         let mut sessions = Sessions::new(
-            home,
-            Some(config.clone()),
+            home().map(Path::to_path_buf),
+            claude().map(Path::to_path_buf),
             Vec::new(),
             Duration::from_secs(1),
-            MemHost::default(),
+            host,
         );
         let procs = HashMap::from([in_dir(proc(10, 1, 100, "claude"), "/x/hum")]);
-        let (agents, _) = sessions.observe(&procs, now);
-        std::fs::remove_dir_all(&config).unwrap();
+        let (agents, _) = sessions.observe(&procs, fixture::now());
         assert_eq!(agents[0].reported, Some(false));
         assert_eq!(agents[0].subagents.len(), 1);
         assert!(agents[0].busy());

@@ -394,7 +394,7 @@ mod tests {
         fake.hold(1, &[30]);
         let mut ports = Ports::new(fake);
         let procs = HashMap::from([proc(40, 1, 400, "claude"), proc(30, 40, 401, "python3")]);
-        let agents = agents::scan(&procs, None, &[], |_| None);
+        let agents = agents::scan(&procs, None, &[], None, &MemHost::default());
         let owners = |got: &[Listener]| -> Vec<Option<(&str, bool)>> {
             got.iter()
                 .map(|l| l.owner.as_ref().map(|o| (o.label.kind, o.orphan)))

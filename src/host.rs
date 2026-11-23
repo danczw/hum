@@ -1,7 +1,9 @@
-//! Every read of /proc goes through [`Host`], so tests run on [`MemHost`]
-//! without real pids.
+//! Every read of /proc and of Claude Code's config dir goes through
+//! [`Host`], so tests run on [`MemHost`] without real pids or temp dirs.
 
 use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use sysinfo::Pid;
 
@@ -19,6 +21,20 @@ pub trait Host {
     fn socket_inodes(&self, pid: Pid) -> Vec<u64>;
     /// The text of `/proc/meminfo`.
     fn meminfo(&self) -> Option<String>;
+    /// A file's text; None when missing or unreadable.
+    fn read(&self, path: &Path) -> Option<String>;
+    fn is_dir(&self, path: &Path) -> bool;
+    /// The paths in `dir`, unsorted; None when it is unreadable.
+    fn list(&self, dir: &Path) -> Option<Vec<PathBuf>>;
+    fn times(&self, path: &Path) -> Option<Times>;
+}
+
+/// A file's timestamps.
+#[derive(Clone, Copy)]
+pub struct Times {
+    pub modified: SystemTime,
+    /// Birth time; None where the filesystem does not keep it.
+    pub created: Option<SystemTime>,
 }
 
 /// The fields hum uses from a `/proc/<pid>/stat` line.
@@ -96,6 +112,27 @@ impl Host for ProcHost {
     fn meminfo(&self) -> Option<String> {
         fs::read_to_string("/proc/meminfo").ok()
     }
+
+    fn read(&self, path: &Path) -> Option<String> {
+        fs::read_to_string(path).ok()
+    }
+
+    fn is_dir(&self, path: &Path) -> bool {
+        path.is_dir()
+    }
+
+    fn list(&self, dir: &Path) -> Option<Vec<PathBuf>> {
+        let entries = fs::read_dir(dir).ok()?;
+        Some(entries.filter_map(Result::ok).map(|e| e.path()).collect())
+    }
+
+    fn times(&self, path: &Path) -> Option<Times> {
+        let meta = fs::metadata(path).ok()?;
+        Some(Times {
+            modified: meta.modified().ok()?,
+            created: meta.created().ok(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -104,7 +141,7 @@ pub use mem::MemHost;
 #[cfg(test)]
 mod mem {
     use std::cell::RefCell;
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
 
     use super::*;
 
@@ -120,6 +157,9 @@ mod mem {
         pub listen: Vec<(u16, u64)>,
         pub sockets: HashMap<Pid, Vec<u64>>,
         pub meminfo: Option<String>,
+        /// Files by path, with their text and times; a dir exists while it
+        /// holds a file.
+        pub files: BTreeMap<PathBuf, (String, Times)>,
     }
 
     impl MemHost {
@@ -132,6 +172,15 @@ mod mem {
                     cpu: ticks,
                 },
             );
+        }
+
+        /// Writes `text` to `path`, created and modified at `at`.
+        pub fn file(&mut self, path: impl Into<PathBuf>, text: &str, at: SystemTime) {
+            let times = Times {
+                modified: at,
+                created: Some(at),
+            };
+            self.files.insert(path.into(), (text.into(), times));
         }
 
         /// `pids` each hold socket `inode`, beside an unwanted one.
@@ -175,6 +224,31 @@ mod mem {
 
         fn meminfo(&self) -> Option<String> {
             self.meminfo.clone()
+        }
+
+        fn read(&self, path: &Path) -> Option<String> {
+            self.files.get(path).map(|(text, _)| text.clone())
+        }
+
+        fn is_dir(&self, path: &Path) -> bool {
+            self.files.keys().any(|f| f != path && f.starts_with(path))
+        }
+
+        fn list(&self, dir: &Path) -> Option<Vec<PathBuf>> {
+            if !self.is_dir(dir) {
+                return None;
+            }
+            let mut found: Vec<PathBuf> = self
+                .files
+                .keys()
+                .filter_map(|f| Some(dir.join(f.strip_prefix(dir).ok()?.components().next()?)))
+                .collect();
+            found.dedup();
+            Some(found)
+        }
+
+        fn times(&self, path: &Path) -> Option<Times> {
+            self.files.get(path).map(|&(_, times)| times)
         }
     }
 }

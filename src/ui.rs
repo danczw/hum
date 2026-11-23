@@ -987,6 +987,7 @@ mod tests {
 
     use crate::agents::{self, BusyTracker, ProcInfo};
     use crate::claude::Subagent;
+    use crate::host::MemHost;
     use crate::label::Label;
     use crate::ports::Holder;
 
@@ -1036,7 +1037,13 @@ mod tests {
     }
 
     fn scan(procs: &[(Pid, ProcInfo)]) -> Vec<Agent> {
-        agents::scan(&procs.iter().cloned().collect(), None, &[], |_| None)
+        agents::scan(
+            &procs.iter().cloned().collect(),
+            None,
+            &[],
+            None,
+            &MemHost::default(),
+        )
     }
 
     /// Draws with `view`, so its cursor carries over to the next frame.
@@ -1117,7 +1124,7 @@ mod tests {
         let procs: HashMap<Pid, ProcInfo> = procs.into_iter().collect();
         draw_agents(
             (width, height),
-            agents::scan(&procs, None, &[], |_| None),
+            agents::scan(&procs, None, &[], None, &MemHost::default()),
             cores,
             view,
         )
@@ -1244,7 +1251,7 @@ mod tests {
         let mut procs = mockup();
         procs[2].1.cpu = 0.0;
         let procs: HashMap<Pid, ProcInfo> = procs.into_iter().collect();
-        let mut agents = agents::scan(&procs, None, &[], |_| None);
+        let mut agents = agents::scan(&procs, None, &[], None, &MemHost::default());
         let mut busy = BusyTracker::default();
         for _ in 0..10 {
             busy.update(&mut agents);
