@@ -320,14 +320,6 @@ pub mod fixture {
         }
     }
 
-    /// The file of session `5e55` at `/x/hum` for `pid`, with its status
-    /// `busy` or `idle`.
-    pub fn session(host: &mut MemHost, pid: u32, status: &str) {
-        let path = Path::new(CONFIG).join(format!("sessions/{pid}.json"));
-        let file = format!(r#"{{"cwd":"/x/hum","sessionId":"5e55","status":"{status}"}}"#);
-        host.file(path, &file, now());
-    }
-
     impl SessionFile {
         /// The file as Claude Code writes it.
         pub fn json(&self) -> String {

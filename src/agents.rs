@@ -788,15 +788,17 @@ impl<H: Host> Sessions<H> {
         }
     }
 
+    /// `at` times the cpu reads, `now` the subagent files.
     pub fn observe(
         &mut self,
         procs: &HashMap<Pid, ProcInfo>,
+        at: Instant,
         now: SystemTime,
     ) -> (Vec<Agent>, Vec<Orphan>) {
         let (home, claude) = (self.home.as_deref(), self.claude.as_deref());
         let mut agents = scan(procs, home, &self.extra, claude, &self.host);
         // before the subagent reads, so fewer members exit since the snapshot
-        self.cpu.update(&mut agents, Instant::now(), &self.host);
+        self.cpu.update(&mut agents, at, &self.host);
         if let Some(claude) = claude {
             for agent in &mut agents {
                 if let Some(id) = &agent.session_id {
@@ -1712,10 +1714,23 @@ mod tests {
     }
 
     #[test]
-    fn running_subagent_makes_an_idle_session_busy() {
+    fn sessions_across_ticks_on_the_memory_host() {
         let mut host = MemHost::default();
-        fixture::session(&mut host, 10, "idle");
+        let file = r#"{"cwd":"/x/hum","sessionId":"5e55","status":"idle","procStart":100}"#;
+        host.file(
+            format!("{}/sessions/10.json", fixture::CONFIG),
+            file,
+            fixture::now(),
+        );
         fixture::subagents(&mut host, &[("a1", r#"{"agentType":"Explore"}"#, 0)]);
+        host.stats.insert(
+            Pid::from_u32(10),
+            Stat {
+                start: 100,
+                cpu: 1000,
+            },
+        );
+        host.cpu(11, 500);
         let mut sessions = Sessions::new(
             home().map(Path::to_path_buf),
             claude().map(Path::to_path_buf),
@@ -1723,11 +1738,44 @@ mod tests {
             Duration::from_secs(1),
             host,
         );
-        let procs = HashMap::from([in_dir(proc(10, 1, 100, "claude"), "/x/hum")]);
-        let (agents, _) = sessions.observe(&procs, fixture::now());
+        let procs = HashMap::from([
+            in_dir(proc(10, 1, 100, "claude"), "/x/hum"),
+            proc(11, 10, 101, "sh"),
+        ]);
+        let tick = |sessions: &mut Sessions<MemHost>, procs, secs, wall| {
+            let wall = fixture::now() + Duration::from_secs(wall);
+            sessions.observe(procs, after(secs), wall).0
+        };
+
+        // idle at the prompt, but a subagent runs
+        let agents = tick(&mut sessions, &procs, 0, 0);
+        assert_eq!(agents[0].label().to_string(), "claude/hum");
         assert_eq!(agents[0].reported, Some(false));
         assert_eq!(agents[0].subagents.len(), 1);
         assert!(agents[0].busy());
+
+        // the tree ran 50 ticks in a second
+        sessions.host.stats.get_mut(&Pid::from_u32(10)).unwrap().cpu += 30;
+        sessions.host.cpu(11, 520);
+        let agents = tick(&mut sessions, &procs, 1, 1);
+        assert_eq!(cores(agents[0].cpu), 0.5);
+
+        // the subagent's transcript has gone quiet
+        let agents = tick(&mut sessions, &procs, 2, 700);
+        assert!(agents[0].subagents.is_empty());
+        assert!(!agents[0].busy());
+
+        // pid 10 now runs a later claude, so the file is not its own
+        sessions
+            .host
+            .stats
+            .get_mut(&Pid::from_u32(10))
+            .unwrap()
+            .start = 900;
+        let procs = HashMap::from([in_dir(proc(10, 1, 900, "claude"), "/x/hum")]);
+        let agents = tick(&mut sessions, &procs, 3, 701);
+        assert_eq!(agents[0].reported, None);
+        assert!(agents[0].subagents.is_empty());
     }
 
     #[test]
