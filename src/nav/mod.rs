@@ -63,8 +63,9 @@ pub enum Outcome {
 #[derive(Debug, Default)]
 pub struct Lines {
     /// Data lines per section, indexed by [`AGENTS`], [`ORPHANS`] and
-    /// [`PORTS`]; None when the section shows no rows, so `Tab` passes over
-    /// it.
+    /// [`PORTS`]. None when its rows fold into a border or the pane is too
+    /// small, so `Tab` passes over it; a section squeezed to `Some(0)` keeps
+    /// its rows and its place in `Tab`.
     pub sections: [Option<usize>; SECTIONS],
     /// Help lines that do not fit, the furthest the help scrolls.
     pub help_overflow: usize,
