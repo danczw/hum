@@ -8,9 +8,10 @@ use ratatui::widgets::{
 };
 
 use crate::agents::{self, Agent, Orphan, Owner};
-use crate::focus::{self, Focus, Key};
 use crate::label::cut;
-use crate::outline::{self, Entry, Fold, Outline};
+use crate::nav::Key;
+use crate::nav::cursor::{self, Focus};
+use crate::nav::outline::{self, Entry, Fold, Outline};
 use crate::ports::Listener;
 use crate::theme::Theme;
 
@@ -111,23 +112,23 @@ impl View {
 
     /// Expands or collapses the tree under the agents cursor.
     pub fn fold(&mut self, agents: &[Agent], fold: Fold) {
-        if !self.focus.shows(focus::AGENTS) {
+        if !self.focus.shows(cursor::AGENTS) {
             return;
         }
-        let Some(at) = self.focus.selected(focus::AGENTS) else {
+        let Some(at) = self.focus.selected(cursor::AGENTS) else {
             return;
         };
         if let Some(to) = self.outline.fold(agents, at, fold) {
-            self.focus.select(focus::AGENTS, to);
+            self.focus.select(cursor::AGENTS, to);
         }
     }
 
     /// Forgets exited sessions and moves a cursor on a hidden child to its
     /// root, whether `c` collapsed the tree or the tree changed under it.
     fn sync(&mut self, agents: &[Agent]) {
-        let at = self.focus.selected(focus::AGENTS);
+        let at = self.focus.selected(cursor::AGENTS);
         if let Some(to) = self.outline.sync(agents, at) {
-            self.focus.select(focus::AGENTS, to);
+            self.focus.select(cursor::AGENTS, to);
         }
     }
 }
@@ -431,7 +432,7 @@ fn agents_section(entries: &[Entry], width: u16, theme: &Theme) -> Section {
         .collect();
     Section {
         name: "agents",
-        pane: focus::AGENTS,
+        pane: cursor::AGENTS,
         count: entries
             .iter()
             .filter(|e| matches!(e.line, outline::Line::Root { .. }))
@@ -449,7 +450,7 @@ fn agents_section(entries: &[Entry], width: u16, theme: &Theme) -> Section {
             cores,
         )),
         rows,
-        keys: entries.iter().map(|e| e.key).collect(),
+        keys: entries.iter().map(|e| e.key.clone()).collect(),
         widths: columns(
             [
                 Constraint::Length(process),
@@ -488,7 +489,7 @@ fn orphans_section(orphans: &[Orphan], width: u16, theme: &Theme) -> Section {
         .collect();
     Section {
         name: "orphans",
-        pane: focus::ORPHANS,
+        pane: cursor::ORPHANS,
         count: orphans.len(),
         total: None,
         count_style: if orphans.is_empty() {
@@ -507,7 +508,7 @@ fn orphans_section(orphans: &[Orphan], width: u16, theme: &Theme) -> Section {
             cores,
         )),
         rows,
-        keys: orphans.iter().map(|o| focus::key(o.key())).collect(),
+        keys: orphans.iter().map(|o| Key::Proc(o.key())).collect(),
         // name as wide as its `process` header; `from` takes the rest
         widths: columns(
             [
@@ -601,7 +602,7 @@ fn ports_section(
     };
     Section {
         name: "ports",
-        pane: focus::PORTS,
+        pane: cursor::PORTS,
         count: shown.len(),
         total: (shown.len() < ports.len()).then_some(ports.len()),
         count_style: theme.dim,
@@ -614,7 +615,10 @@ fn ports_section(
         rows,
         keys: shown
             .iter()
-            .map(|p| (u64::from(p.port), p.pid().map_or(0, |p| p.as_u32().into())))
+            .map(|p| Key::Port {
+                port: p.port,
+                pid: p.pid(),
+            })
             .collect(),
         widths: vec![
             Constraint::Length(PORT_WIDTH),

@@ -1,13 +1,4 @@
-use crate::agents::ProcKey;
-
-/// Names a row across ticks so the cursor follows it when rows reorder:
-/// `(pid, start time)` for processes, `(port, pid)` for ports; subagents
-/// get theirs in [`crate::outline`].
-pub type Key = (u64, u64);
-
-pub fn key(proc: ProcKey) -> Key {
-    (proc.pid.as_u32().into(), proc.start)
-}
+use super::Key;
 
 /// Sections in the order `Tab` cycles through.
 pub const AGENTS: usize = 0;
@@ -47,11 +38,15 @@ impl Pane {
     /// `+N more` line takes the last one.
     pub fn frame(&mut self, keys: Vec<Key>, height: usize) -> Window {
         let len = keys.len();
-        if let Some(i) = self.key.and_then(|k| keys.iter().position(|&x| x == k)) {
+        if let Some(i) = self
+            .key
+            .as_ref()
+            .and_then(|k| keys.iter().position(|x| x == k))
+        {
             self.index = i;
         }
         self.index = self.index.min(len.saturating_sub(1));
-        self.key = keys.get(self.index).copied();
+        self.key = keys.get(self.index).cloned();
         self.keys = keys;
 
         let (offset, rows, more) = if len <= height {
@@ -89,7 +84,7 @@ impl Pane {
     fn select(&mut self, index: usize) {
         if let Some(last) = self.keys.len().checked_sub(1) {
             self.index = index.min(last);
-            self.key = Some(self.keys[self.index]);
+            self.key = Some(self.keys[self.index].clone());
         }
     }
 }
@@ -109,8 +104,8 @@ impl Focus {
     }
 
     /// The row the cursor of `section` is on, shown or not.
-    pub fn selected(&self, section: usize) -> Option<Key> {
-        self.panes[section].key
+    pub fn selected(&self, section: usize) -> Option<&Key> {
+        self.panes[section].key.as_ref()
     }
 
     /// Puts the cursor of `section` on `key` from the next frame on.
@@ -190,13 +185,23 @@ impl Focus {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use sysinfo::Pid;
 
-    fn keys(ids: impl IntoIterator<Item = u64>) -> Vec<Key> {
-        ids.into_iter().map(|id| (id, 0)).collect()
+    use super::*;
+    use crate::agents::ProcKey;
+
+    fn keys(ids: impl IntoIterator<Item = u32>) -> Vec<Key> {
+        ids.into_iter()
+            .map(|id| {
+                Key::Proc(ProcKey {
+                    pid: Pid::from_u32(id),
+                    start: 0,
+                })
+            })
+            .collect()
     }
 
-    fn agents(focus: &mut Focus, ids: impl IntoIterator<Item = u64>, height: usize) -> Window {
+    fn agents(focus: &mut Focus, ids: impl IntoIterator<Item = u32>, height: usize) -> Window {
         focus.pane(0).frame(keys(ids), height)
     }
 
