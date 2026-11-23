@@ -1279,7 +1279,7 @@ mod tests {
         assert!(!agents[0].busy());
     }
 
-    /// A stat line whose utime, stime, cutime and cstime are `times`.
+    /// A stat line of `comm` with the given utime, stime, cutime and cstime.
     fn stat_line(comm: &str, [utime, stime, cutime, cstime]: [i64; 4]) -> String {
         format!(
             "42 ({comm}) S 1 42 42 0 -1 4194304 0 0 0 0 {utime} {stime} {cutime} {cstime} 20 0 1 0 100"
@@ -1296,17 +1296,21 @@ mod tests {
 
     #[test]
     fn reaped_child_time_reads_on_parent() {
-        // the outer sh reaps the inner one between its two reads of its stat
-        let burn = "i=0; while [ $i -lt 500000 ]; do i=$((i+1)); done";
-        let script = format!("cat /proc/$$/stat; sh -c '{burn}'; cat /proc/$$/stat");
+        // the inner sh runs until its own stat reads 20 ticks; the outer one
+        // reaps it between its two reads of its stat
+        let burn = "while :; do set -- $(cat /proc/$$/stat); \
+            [ $((${14} + ${15} + ${16} + ${17})) -ge 20 ] && break; done";
+        let script = ["cat /proc/$$/stat; sh -c '", burn, "'; cat /proc/$$/stat"].concat();
         let out = std::process::Command::new("sh")
             .args(["-c", &script])
             .output()
             .unwrap();
         let out = String::from_utf8(out.stdout).unwrap();
-        let ticks: Vec<u64> = out.lines().map(|l| cpu_ticks(l).unwrap()).collect();
-        // the loop took 45 ticks on WSL2
-        assert!(ticks[1] >= ticks[0] + 10, "{ticks:?}");
+        let ticks: Vec<Option<u64>> = out.lines().map(cpu_ticks).collect();
+        let [Some(before), Some(after)] = ticks[..] else {
+            panic!("{out}");
+        };
+        assert!(after >= before + 20, "{ticks:?}");
     }
 
     /// `secs` after an instant fixed for the test run.
