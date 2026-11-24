@@ -214,23 +214,18 @@ pub fn plan(area: Rect, snapshot: &Snapshot, lists: &Lists, nav: &Nav) -> Plan {
     .areas(area);
 
     let rows = [lists.agents.len(), lists.orphans.len(), lists.ports.len()];
-    let shows = [AGENTS, ORPHANS, PORTS].map(|s| nav.shows(s));
+    let sections = [AGENTS, ORPHANS, PORTS].map(|s| (rows[s], nav.shows(s)));
     // ports end the stack they are in, so a compact box folds them
     let slots = if wide {
         let side = (body.width * 2 / 5).max(SIDE_MIN);
         let [left, right] =
             Layout::horizontal([Constraint::Fill(1), Constraint::Length(side)]).areas(body);
-        let [agents] = stack([rows[AGENTS]], [shows[AGENTS]], left, compact, false);
-        let [orphans, ports] = stack(
-            [rows[ORPHANS], rows[PORTS]],
-            [shows[ORPHANS], shows[PORTS]],
-            right,
-            compact,
-            compact,
-        );
+        let [agents, orphans, ports] = sections;
+        let [agents] = stack([agents], left, compact, false);
+        let [orphans, ports] = stack([orphans, ports], right, compact, compact);
         [agents, orphans, ports]
     } else {
-        stack(rows, shows, body, compact, compact)
+        stack(sections, body, compact, compact)
     };
     Plan {
         gauges,
@@ -672,18 +667,17 @@ fn ports_section(
     }
 }
 
-/// Stacks sections of `rows` rows top to bottom. Every section keeps its
-/// title. A section that `shows` its cursor first gets a line for it, then
-/// data rows go to the earlier sections first. Rows nobody needs are shared
-/// out so the boxes fill the area.
+/// Stacks `sections`, each its rows and whether it shows its cursor, top
+/// to bottom. Every section keeps its title. One that shows its cursor
+/// first gets a line for it, then data rows go to the earlier sections
+/// first. Rows nobody needs are shared out so the boxes fill the area.
 ///
 /// Each section is a box, and a header shows over at least one row or in
 /// an empty section. `compact`, the sections share one box split by
 /// `├ name ─┤` lines and drop their headers. `footer`, the last section
 /// folds into the bottom border of a compact box.
 fn stack<const N: usize>(
-    mut rows: [usize; N],
-    shows: [bool; N],
+    mut sections: [(usize, bool); N],
     area: Rect,
     compact: bool,
     footer: bool,
@@ -691,7 +685,7 @@ fn stack<const N: usize>(
     debug_assert!(compact || !footer, "only a compact box folds a footer");
     if footer {
         // its entries go in the border, not in rows
-        rows[N - 1] = 0;
+        sections[N - 1].0 = 0;
     }
     let header = u16::from(!compact);
     let mut left = area.height;
@@ -710,13 +704,13 @@ fn stack<const N: usize>(
     // header and data lines; a section given one line shows a row without
     // its header
     let mut lines = [0; N];
-    for ((l, &shows), &n) in lines.iter_mut().zip(&shows).zip(&rows) {
+    for (l, &(n, shows)) in lines.iter_mut().zip(&sections) {
         if shows && n > 0 {
             *l = left.min(1 + header);
             left -= *l;
         }
     }
-    for (l, &n) in lines.iter_mut().zip(&rows) {
+    for (l, &(n, _)) in lines.iter_mut().zip(&sections) {
         if n == 0 {
             continue;
         }
@@ -754,7 +748,7 @@ fn stack<const N: usize>(
         };
         let inner = block(borders, divider).inner(area).height;
         // a single line goes to a row, not to a header with nothing under it
-        let header = !compact && (inner >= 2 || rows[i] == 0);
+        let header = !compact && (inner >= 2 || sections[i].0 == 0);
         Slot::Rows(Rows {
             area,
             borders,
@@ -1574,7 +1568,7 @@ mod tests {
     #[test]
     fn empty_box_squeezed_to_its_borders_gets_no_lines() {
         let area = Rect::new(0, 0, 74, 14);
-        let slots = stack([30, 0, 0], [false; 3], area, false, false);
+        let slots = stack([(30, false), (0, false), (0, false)], area, false, false);
         for slot in &slots[1..] {
             assert!(matches!(slot, Slot::Rows(Rows { lines: 0, .. })));
         }
