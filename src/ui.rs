@@ -10,7 +10,7 @@ use ratatui::widgets::{
 use crate::agents::{self, Agent, Orphan, Owner};
 use crate::label::cut;
 use crate::nav::outline::{self, Entry};
-use crate::nav::{AGENTS, Lines, Nav, ORPHANS, PORTS, SECTIONS, Window};
+use crate::nav::{AGENTS, Lines, Lists, Nav, ORPHANS, PORTS, SECTIONS, Window};
 use crate::ports::Listener;
 use crate::theme::Theme;
 
@@ -192,7 +192,7 @@ impl Plan {
     }
 }
 
-pub fn plan(area: Rect, snapshot: &Snapshot, nav: &Nav) -> Plan {
+pub fn plan(area: Rect, snapshot: &Snapshot, lists: &Lists, nav: &Nav) -> Plan {
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         let [gauges, _] = too_small(area);
         return Plan { gauges, body: None };
@@ -217,11 +217,7 @@ pub fn plan(area: Rect, snapshot: &Snapshot, nav: &Nav) -> Plan {
     ])
     .areas(area);
 
-    let rows = [
-        nav.rows(&snapshot.agents).len(),
-        snapshot.orphans.len(),
-        nav.ports(&snapshot.ports).len(),
-    ];
+    let rows = [lists.agents.len(), lists.orphans.len(), lists.ports.len()];
     let shows = [AGENTS, ORPHANS, PORTS].map(|s| nav.shows(s));
     // ports end the stack they are in, so a compact box folds them
     let slots = if wide {
@@ -255,6 +251,7 @@ pub fn plan(area: Rect, snapshot: &Snapshot, nav: &Nav) -> Plan {
 pub fn draw(
     frame: &mut Frame,
     snapshot: &Snapshot,
+    lists: &Lists,
     nav: &Nav,
     theme: &Theme,
     plan: Plan,
@@ -275,13 +272,11 @@ pub fn draw(
     if let Some((grid, area)) = grid {
         draw_cores(frame, &snapshot.gauges.cores, grid, area, theme);
     }
-    let rows = nav.rows(&snapshot.agents);
-    let ports = nav.ports(&snapshot.ports);
     let sections = [
-        agents_section(&rows, slots[AGENTS].width(), theme),
-        orphans_section(&snapshot.orphans, slots[ORPHANS].width(), theme),
+        agents_section(&lists.agents, slots[AGENTS].width(), theme),
+        orphans_section(lists.orphans, slots[ORPHANS].width(), theme),
         ports_section(
-            &ports,
+            &lists.ports,
             snapshot.ports.len(),
             slots[PORTS].width(),
             compact,
@@ -1525,7 +1520,7 @@ mod tests {
             public: true,
             ..port(3000, 9120, "node", agent_owner("hum", None))
         }];
-        let shown = Nav::default().ports(&ports);
+        let shown: Vec<_> = ports.iter().collect();
         let section = ports_section(&shown, ports.len(), 74, false, &Theme::ayu_mirage());
         assert_eq!((section.count, section.total), (1, None));
     }
@@ -1565,10 +1560,22 @@ mod tests {
         view.load(snapshot(scan(&mockup()), eight_cores()));
         for (size, ports) in [((74, 9), None), ((92, 9), None), ((74, 16), Some(1))] {
             let area = Rect::new(0, 0, size.0, size.1);
-            let lines = plan(area, &view.snapshot, &view.nav).lines();
+            let lines = plan(
+                area,
+                &view.snapshot,
+                &view.nav.lists(&view.snapshot),
+                &view.nav,
+            )
+            .lines();
             assert_eq!(lines.sections[PORTS], ports, "{size:?}");
         }
-        let lines = plan(Rect::new(0, 0, 30, 9), &view.snapshot, &view.nav).lines();
+        let lines = plan(
+            Rect::new(0, 0, 30, 9),
+            &view.snapshot,
+            &view.nav.lists(&view.snapshot),
+            &view.nav,
+        )
+        .lines();
         assert_eq!(lines.sections, [None; SECTIONS]);
     }
 
