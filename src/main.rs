@@ -161,11 +161,13 @@ fn run(mut terminal: DefaultTerminal, app: &mut App, theme: &Theme) -> io::Resul
     }
 }
 
-/// Lays out the frame, fits the cursors to it, then paints.
+/// Finds the cursors' rows, lays out the frame, fits the cursors to it,
+/// then paints.
 fn render(frame: &mut Frame, snapshot: &Snapshot, nav: &mut Nav, theme: &Theme) {
     let lists = nav.lists(snapshot);
+    nav.sync(&lists);
     let plan = ui::plan(frame.area(), snapshot, &lists, nav);
-    let windows = nav.frame(&lists, &plan.lines());
+    let windows = nav.frame(&plan.lines());
     ui::draw(frame, snapshot, &lists, nav, theme, plan, &windows);
 }
 
