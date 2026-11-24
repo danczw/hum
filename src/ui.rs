@@ -967,7 +967,7 @@ impl HelpBox {
     }
 }
 
-/// The help scrolled down `scroll` lines, at most to its last.
+/// The help scrolled down `scroll` lines, as [`Nav::frame`] clamps it.
 fn draw_help(frame: &mut Frame, help: HelpBox, scroll: usize) {
     let mut block = Block::bordered()
         .border_type(BorderType::Rounded)
