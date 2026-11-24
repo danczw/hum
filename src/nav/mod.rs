@@ -8,7 +8,7 @@ pub mod outline;
 
 use sysinfo::Pid;
 
-use crate::agents::{Agent, ProcKey};
+use crate::agents::{Agent, Orphan, ProcKey};
 use crate::ports::Listener;
 use crate::ui::Snapshot;
 use cursor::Focus;
@@ -69,6 +69,16 @@ pub struct Lines {
     pub sections: [Option<usize>; SECTIONS],
     /// Help lines that do not fit, the furthest the help scrolls.
     pub help_overflow: usize,
+}
+
+/// Each section's rows in one frame, built once for layout, cursors and
+/// paint.
+pub struct Lists<'a> {
+    /// Open trees expanded.
+    pub agents: Vec<Entry<'a>>,
+    pub orphans: &'a [Orphan],
+    /// Those of agents and orphans, or every port once `a` toggles them all.
+    pub ports: Vec<&'a Listener>,
 }
 
 #[derive(Default)]
@@ -133,29 +143,34 @@ impl Nav {
         }
     }
 
-    /// Finds each cursor's row in `snapshot` and scrolls it into the lines
+    pub fn lists<'a>(&self, snapshot: &'a Snapshot) -> Lists<'a> {
+        Lists {
+            agents: self.outline.rows(&snapshot.agents),
+            orphans: &snapshot.orphans,
+            ports: snapshot
+                .ports
+                .iter()
+                .filter(|p| self.all_ports || p.owner.is_some())
+                .collect(),
+        }
+    }
+
+    /// Finds each cursor's row in `lists` and scrolls it into the lines
     /// `lines` gives its section, then moves focus off a section that shows
     /// no rows. A hidden section gets an empty window.
-    pub fn frame(&mut self, snapshot: &Snapshot, lines: &Lines) -> [Window; SECTIONS] {
-        let mut keys: [Vec<Key>; SECTIONS] = Default::default();
-        keys[AGENTS] = self
-            .rows(&snapshot.agents)
-            .into_iter()
-            .map(|e| e.key)
-            .collect();
-        keys[ORPHANS] = snapshot
-            .orphans
-            .iter()
-            .map(|o| Key::Proc(o.key()))
-            .collect();
-        keys[PORTS] = self
-            .ports(&snapshot.ports)
-            .iter()
-            .map(|p| Key::Port {
-                port: p.port,
-                pid: p.pid(),
-            })
-            .collect();
+    pub fn frame(&mut self, lists: &Lists, lines: &Lines) -> [Window; SECTIONS] {
+        let keys: [Vec<Key>; SECTIONS] = [
+            lists.agents.iter().map(|e| e.key.clone()).collect(),
+            lists.orphans.iter().map(|o| Key::Proc(o.key())).collect(),
+            lists
+                .ports
+                .iter()
+                .map(|p| Key::Port {
+                    port: p.port,
+                    pid: p.pid(),
+                })
+                .collect(),
+        ];
         let mut windows: [Window; SECTIONS] = Default::default();
         for (section, keys) in keys.into_iter().enumerate() {
             let pane = self.focus.pane(section);
@@ -170,20 +185,6 @@ impl Nav {
             *scroll = (*scroll).min(self.help_overflow);
         }
         windows
-    }
-
-    /// The agents section's rows, open trees expanded.
-    pub fn rows<'a>(&self, agents: &'a [Agent]) -> Vec<Entry<'a>> {
-        self.outline.rows(agents)
-    }
-
-    /// The ports section's rows: those of agents and orphans, or every port
-    /// once `a` toggles them all.
-    pub fn ports<'a>(&self, ports: &'a [Listener]) -> Vec<&'a Listener> {
-        ports
-            .iter()
-            .filter(|p| self.all_ports || p.owner.is_some())
-            .collect()
     }
 
     pub fn shows(&self, section: usize) -> bool {
@@ -217,7 +218,7 @@ impl Nav {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::{Orphan, Owner, Proc};
+    use crate::agents::{Owner, Proc};
     use crate::label::Label;
     use crate::ports::Holder;
     use crate::ui::Gauges;
@@ -332,7 +333,7 @@ mod tests {
     fn esc_closes_the_help_then_hides_the_cursor_then_quits() {
         let now = snapshot(vec![agent(10, 0)], &[], &[]);
         let mut nav = Nav::default();
-        nav.frame(&now, &lines(true));
+        nav.frame(&nav.lists(&now), &lines(true));
         press(&mut nav, &now, &[Down, Help, Back]);
         assert_eq!(nav.help(), None);
         assert!(nav.shows(AGENTS));
@@ -345,19 +346,19 @@ mod tests {
     fn help_scrolls_to_its_last_line_over_a_still_cursor() {
         let now = snapshot(vec![agent(10, 0), agent(20, 0)], &[], &[]);
         let mut nav = Nav::default();
-        nav.frame(&now, &lines(true));
+        nav.frame(&nav.lists(&now), &lines(true));
         press(&mut nav, &now, &[Down, Help]);
         let help = Lines {
             help_overflow: 2,
             ..lines(true)
         };
-        nav.frame(&now, &help);
+        nav.frame(&nav.lists(&now), &help);
         press(&mut nav, &now, &[Down, Down, Down]);
         assert_eq!(nav.help(), Some(2));
         press(&mut nav, &now, &[Up]);
         assert_eq!(nav.help(), Some(1));
         // a taller pane fits it all
-        nav.frame(&now, &lines(true));
+        nav.frame(&nav.lists(&now), &lines(true));
         assert_eq!(nav.help(), Some(0));
         assert_eq!(nav.focus.selected(AGENTS), Some(&pid(10)));
         assert_eq!(nav.handle(Quit, &now), Outcome::Quit);
@@ -368,17 +369,20 @@ mod tests {
         let now = snapshot(vec![agent(10, 2), agent(20, 1), agent(30, 0)], &[], &[]);
         let mut nav = Nav::default();
         press(&mut nav, &now, &[ExpandAll]);
-        nav.frame(&now, &lines(true));
+        nav.frame(&nav.lists(&now), &lines(true));
         press(&mut nav, &now, &[Down, Down, Down]);
         assert_eq!(nav.focus.selected(AGENTS), Some(&pid(12)));
         press(&mut nav, &now, &[Toggle]);
         assert_eq!(nav.focus.selected(AGENTS), Some(&pid(10)));
-        assert_eq!(nav.frame(&now, &lines(true))[AGENTS].selected, 0);
+        assert_eq!(
+            nav.frame(&nav.lists(&now), &lines(true))[AGENTS].selected,
+            0
+        );
         // so does collapsing every tree, before the next frame
         press(&mut nav, &now, &[ExpandAll]);
-        nav.frame(&now, &lines(true));
+        nav.frame(&nav.lists(&now), &lines(true));
         press(&mut nav, &now, &[Last]);
-        nav.frame(&now, &lines(true));
+        nav.frame(&nav.lists(&now), &lines(true));
         press(&mut nav, &now, &[Up]);
         assert_eq!(nav.focus.selected(AGENTS), Some(&pid(21)));
         press(&mut nav, &now, &[CollapseAll]);
@@ -389,11 +393,14 @@ mod tests {
     fn cursor_follows_its_process_when_a_session_above_exits() {
         let mut nav = Nav::default();
         let now = snapshot(vec![agent(10, 0), agent(20, 0)], &[], &[]);
-        nav.frame(&now, &lines(true));
+        nav.frame(&nav.lists(&now), &lines(true));
         press(&mut nav, &now, &[Down, Down]);
         let later = snapshot(vec![agent(20, 0)], &[], &[]);
         nav.observe(&later);
-        assert_eq!(nav.frame(&later, &lines(true))[AGENTS].selected, 0);
+        assert_eq!(
+            nav.frame(&nav.lists(&later), &lines(true))[AGENTS].selected,
+            0
+        );
         assert_eq!(nav.focus.selected(AGENTS), Some(&pid(20)));
     }
 
@@ -401,16 +408,16 @@ mod tests {
     fn folded_ports_take_no_cursor_and_keep_theirs() {
         let now = snapshot(vec![agent(10, 0)], &[9120], &[3000, 8000]);
         let mut nav = Nav::default();
-        nav.frame(&now, &lines(true));
+        nav.frame(&nav.lists(&now), &lines(true));
         press(&mut nav, &now, &[Prev, Prev, Down]);
         assert!(nav.shows(PORTS));
-        assert_eq!(nav.frame(&now, &lines(true))[PORTS].selected, 1);
+        assert_eq!(nav.frame(&nav.lists(&now), &lines(true))[PORTS].selected, 1);
         // folded, focus moves on to agents and Tab passes over ports
-        nav.frame(&now, &lines(false));
+        nav.frame(&nav.lists(&now), &lines(false));
         assert!(nav.shows(AGENTS));
         press(&mut nav, &now, &[Next, Next]);
         assert!(nav.shows(AGENTS));
-        nav.frame(&now, &lines(true));
+        nav.frame(&nav.lists(&now), &lines(true));
         press(&mut nav, &now, &[Prev]);
         assert!(nav.shows(PORTS));
         assert_eq!(nav.focus.selected(PORTS), Some(&port(8000)));
@@ -421,8 +428,8 @@ mod tests {
         let mut now = snapshot(Vec::new(), &[], &[3000]);
         now.ports[0].owner = None;
         let mut nav = Nav::default();
-        assert!(nav.ports(&now.ports).is_empty());
+        assert!(nav.lists(&now).ports.is_empty());
         press(&mut nav, &now, &[AllPorts]);
-        assert_eq!(nav.ports(&now.ports).len(), 1);
+        assert_eq!(nav.lists(&now).ports.len(), 1);
     }
 }

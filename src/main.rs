@@ -163,9 +163,10 @@ fn run(mut terminal: DefaultTerminal, app: &mut App, theme: &Theme) -> io::Resul
 
 /// Lays out the frame, fits the cursors to it, then paints.
 fn render(frame: &mut Frame, snapshot: &Snapshot, nav: &mut Nav, theme: &Theme) {
-    let plan = ui::plan(frame.area(), snapshot, nav);
-    let windows = nav.frame(snapshot, &plan.lines());
-    ui::draw(frame, snapshot, nav, theme, plan, &windows);
+    let lists = nav.lists(snapshot);
+    let plan = ui::plan(frame.area(), snapshot, &lists, nav);
+    let windows = nav.frame(&lists, &plan.lines());
+    ui::draw(frame, snapshot, &lists, nav, theme, plan, &windows);
 }
 
 fn intent(code: KeyCode) -> Option<Intent> {
