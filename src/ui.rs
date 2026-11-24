@@ -123,8 +123,8 @@ struct Section {
 /// can fit its cursors to the lines each section gets.
 pub struct Plan {
     gauges: Rect,
-    /// None below [`MIN_WIDTH`] x [`MIN_HEIGHT`], where a hint shows instead.
-    body: Option<Body>,
+    /// Below [`MIN_WIDTH`] x [`MIN_HEIGHT`], the line for a hint instead.
+    body: Result<Body, Rect>,
 }
 
 /// Everything below the gauge line.
@@ -162,11 +162,6 @@ impl Slot {
     }
 }
 
-/// The gauge line and a hint below it, in a pane too small for more.
-fn too_small(area: Rect) -> [Rect; 2] {
-    Layout::vertical([Constraint::Length(1); 2]).areas(area)
-}
-
 /// A section's rounded box, or its part of a compact one.
 fn block(borders: Borders, divider: bool) -> Block<'static> {
     Block::new()
@@ -177,7 +172,7 @@ fn block(borders: Borders, divider: bool) -> Block<'static> {
 impl Plan {
     /// The lines each section and the help get, for [`Nav::frame`].
     pub fn lines(&self) -> Lines {
-        let Some(Body { slots, help, .. }) = &self.body else {
+        let Ok(Body { slots, help, .. }) = &self.body else {
             return Lines::default();
         };
         Lines {
@@ -192,8 +187,11 @@ impl Plan {
 
 pub fn plan(area: Rect, snapshot: &Snapshot, lists: &Lists, nav: &Nav) -> Plan {
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
-        let [gauges, _] = too_small(area);
-        return Plan { gauges, body: None };
+        let [gauges, hint] = Layout::vertical([Constraint::Length(1); 2]).areas(area);
+        return Plan {
+            gauges,
+            body: Err(hint),
+        };
     }
     let grid = nav
         .cores()
@@ -236,7 +234,7 @@ pub fn plan(area: Rect, snapshot: &Snapshot, lists: &Lists, nav: &Nav) -> Plan {
     };
     Plan {
         gauges,
-        body: Some(Body {
+        body: Ok(Body {
             grid: grid.map(|g| (g, cores)),
             compact,
             slots,
@@ -256,16 +254,17 @@ pub fn draw(
     windows: &[Window; SECTIONS],
 ) {
     draw_gauges(frame, &snapshot.gauges, plan.gauges, theme);
-    let Some(Body {
+    let Body {
         grid,
         compact,
         slots,
         help,
-    }) = plan.body
-    else {
-        let [_, hint] = too_small(frame.area());
-        frame.render_widget(Line::styled("too small", theme.dim), hint);
-        return;
+    } = match plan.body {
+        Ok(body) => body,
+        Err(hint) => {
+            frame.render_widget(Line::styled("too small", theme.dim), hint);
+            return;
+        }
     };
     if let Some((grid, area)) = grid {
         draw_cores(frame, &snapshot.gauges.cores, grid, area, theme);
