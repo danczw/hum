@@ -33,11 +33,8 @@ pub struct Window {
 }
 
 impl Pane {
-    /// Finds the selected row among `keys` and scrolls so it shows in
-    /// `height` lines. When rows remain below and at least two lines fit, a
-    /// `+N more` line takes the last one.
-    pub fn frame(&mut self, keys: Vec<Key>, height: usize) -> Window {
-        let len = keys.len();
+    /// Finds the selected row among `keys`, the section's rows this frame.
+    pub fn sync(&mut self, keys: Vec<Key>) {
         if let Some(i) = self
             .key
             .as_ref()
@@ -45,10 +42,15 @@ impl Pane {
         {
             self.index = i;
         }
-        self.index = self.index.min(len.saturating_sub(1));
+        self.index = self.index.min(keys.len().saturating_sub(1));
         self.key = keys.get(self.index).cloned();
         self.keys = keys;
+    }
 
+    /// Scrolls so the selected row shows in `height` lines. When rows remain
+    /// below and at least two lines fit, a `+N more` line takes the last one.
+    pub fn frame(&mut self, height: usize) -> Window {
+        let len = self.keys.len();
         let (offset, rows, more) = if len <= height {
             (0, len, 0)
         } else if height < 2 {
@@ -201,8 +203,14 @@ mod tests {
             .collect()
     }
 
+    fn fill(focus: &mut Focus, section: usize, keys: Vec<Key>, height: usize) -> Window {
+        let pane = focus.pane(section);
+        pane.sync(keys);
+        pane.frame(height)
+    }
+
     fn agents(focus: &mut Focus, ids: impl IntoIterator<Item = u32>, height: usize) -> Window {
-        focus.pane(0).frame(keys(ids), height)
+        fill(focus, 0, keys(ids), height)
     }
 
     #[test]
@@ -289,15 +297,15 @@ mod tests {
     fn tab_cycles_sections_and_leaves_their_cursors() {
         let mut focus = Focus::default();
         agents(&mut focus, 0..10, 4);
-        focus.pane(1).frame(keys(0..3), 4);
+        fill(&mut focus, 1, keys(0..3), 4);
         focus.cycle(1);
         assert!(focus.shows(0));
         focus.cycle(1);
         assert!(focus.shows(1));
         focus.step(1);
-        assert_eq!(focus.pane(1).frame(keys(0..3), 4).selected, 1);
+        assert_eq!(fill(&mut focus, 1, keys(0..3), 4).selected, 1);
         assert_eq!(agents(&mut focus, 0..10, 4).selected, 0);
-        focus.pane(2).frame(keys(0..1), 4);
+        fill(&mut focus, 2, keys(0..1), 4);
         focus.cycle(-2);
         assert!(focus.shows(2));
     }
@@ -306,8 +314,8 @@ mod tests {
     fn tab_passes_over_sections_without_rows() {
         let mut focus = Focus::default();
         agents(&mut focus, 0..3, 4);
-        focus.pane(1).frame(Vec::new(), 4);
-        focus.pane(2).frame(keys(0..1), 4);
+        fill(&mut focus, 1, Vec::new(), 4);
+        fill(&mut focus, 2, keys(0..1), 4);
         focus.cycle(1);
         focus.cycle(1);
         assert!(focus.shows(2));
@@ -315,7 +323,7 @@ mod tests {
         assert!(focus.shows(0));
         // nowhere to go: focus stays
         agents(&mut focus, [], 4);
-        focus.pane(2).frame(Vec::new(), 4);
+        fill(&mut focus, 2, Vec::new(), 4);
         focus.cycle(1);
         assert!(focus.shows(0));
     }
@@ -324,11 +332,11 @@ mod tests {
     fn focus_leaves_a_section_whose_rows_went_away() {
         let mut focus = Focus::default();
         agents(&mut focus, 0..3, 4);
-        focus.pane(2).frame(keys(0..1), 4);
+        fill(&mut focus, 2, keys(0..1), 4);
         focus.cycle(-1);
         focus.cycle(-1);
         assert!(focus.shows(2));
-        focus.pane(2).frame(Vec::new(), 4);
+        fill(&mut focus, 2, Vec::new(), 4);
         focus.settle();
         assert!(focus.shows(0));
     }

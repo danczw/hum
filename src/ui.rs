@@ -1796,6 +1796,23 @@ mod tests {
     }
 
     #[test]
+    fn cursor_moved_off_an_emptied_section_shows_in_the_same_frame() {
+        let theme = Theme::ayu_mirage();
+        let mut view = View { theme, ..view() };
+        expand_all(&mut view, &big_tree(29));
+        draw_view((74, 12), big_tree(29), &mut view);
+        view.press(Intent::Next);
+        view.press(Intent::Next);
+        draw_view((74, 12), big_tree(29), &mut view);
+        let mut gone = snapshot(scan(&big_tree(29)), eight_cores());
+        gone.orphans.clear();
+        view.load(gone);
+        let buf = render((74, 12), &mut view);
+        assert_eq!(fg_at(&buf, "ports", 1), fg(theme.accent));
+        assert!(selected_line(&buf, &theme).unwrap().contains("3000"));
+    }
+
+    #[test]
     fn short_panes_show_a_row_without_its_header() {
         let theme = Theme::ayu_mirage();
         for height in [8, 10] {
