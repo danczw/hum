@@ -75,7 +75,6 @@ pub struct Lines {
 pub struct Nav {
     focus: Focus,
     outline: Outline,
-    /// Lines the open help is scrolled down.
     help: Option<usize>,
     /// [`Lines::help_overflow`] of the last frame.
     help_overflow: usize,
@@ -187,7 +186,6 @@ impl Nav {
             .collect()
     }
 
-    /// Whether `section` draws its cursor and an accent title.
     pub fn shows(&self, section: usize) -> bool {
         self.focus.shows(section)
     }
