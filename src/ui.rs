@@ -107,8 +107,6 @@ pub struct Gauges {
 /// A titled list of rows under a dim header naming the columns.
 struct Section {
     name: &'static str,
-    /// Its cursor in [`Nav`]: [`AGENTS`], [`ORPHANS`] or [`PORTS`].
-    pane: usize,
     count: usize,
     /// Rows before a filter, the 7 in `ports: 2/7`; `None` when it hid none.
     total: Option<usize>,
@@ -283,12 +281,10 @@ pub fn draw(
             theme,
         ),
     ];
-    for ((section, slot), window) in sections.into_iter().zip(slots).zip(windows) {
+    let parts = sections.into_iter().zip(slots).zip(windows);
+    for (i, ((section, slot), window)) in parts.enumerate() {
         match slot {
-            Slot::Rows(rows) => {
-                let shows = nav.shows(section.pane);
-                draw_section(frame, section, rows, shows, window, theme);
-            }
+            Slot::Rows(rows) => draw_section(frame, section, rows, nav.shows(i), window, theme),
             Slot::Footer(area) => draw_footer(frame, section, area, theme),
         }
     }
@@ -492,7 +488,6 @@ fn agents_section(entries: &[Entry], width: u16, theme: &Theme) -> Section {
         .collect();
     Section {
         name: "agents",
-        pane: AGENTS,
         count: entries
             .iter()
             .filter(|e| matches!(e.line, outline::Line::Root { .. }))
@@ -548,7 +543,6 @@ fn orphans_section(orphans: &[Orphan], width: u16, theme: &Theme) -> Section {
         .collect();
     Section {
         name: "orphans",
-        pane: ORPHANS,
         count: orphans.len(),
         total: None,
         count_style: if orphans.is_empty() {
@@ -659,7 +653,6 @@ fn ports_section(
     };
     Section {
         name: "ports",
-        pane: PORTS,
         count: shown.len(),
         total: (shown.len() < total).then_some(total),
         count_style: theme.dim,
