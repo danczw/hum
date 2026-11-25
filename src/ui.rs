@@ -7,7 +7,7 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Padding, Paragraph, Row, Table, TableState,
 };
 
-use crate::agents::{self, Agent, Orphan, Owner};
+use crate::agents::{Agent, Orphan, Owner};
 use crate::label::cut;
 use crate::nav::outline::{self, Entry};
 use crate::nav::{AGENTS, Lines, Lists, Nav, ORPHANS, PORTS, SECTIONS, Window};
@@ -20,7 +20,7 @@ use crate::theme::Theme;
 /// pid_max is at most 4194304 on 64-bit Linux: 7 digits.
 const PID_WIDTH: u16 = 7;
 const PID: Constraint = Constraint::Length(PID_WIDTH);
-/// `fmt_cpu` up to 99.99 cores.
+/// `fmt_cpu` up to `9999%`, i.e. 99.99 cores.
 const CPU_WIDTH: u16 = 5;
 const CPU: Constraint = Constraint::Length(CPU_WIDTH);
 /// Agents and orphans show cpu as the 4th of 5 columns. Panes too narrow
@@ -36,18 +36,18 @@ const PORT_WIDTH: u16 = 7;
 const PROCESS: u16 = 12;
 /// Project names get at least this many chars.
 const PROJECT: u16 = 9;
-/// The agents box without its name columns: pid, cores, mem, four gaps, two
+/// The agents box without its name columns: pid, cpu, mem, four gaps, two
 /// borders and a blank column inside each.
 const AGENTS_FIXED: u16 = PID_WIDTH + CPU_WIDTH + MEM_WIDTH + 4 + 2 + 2;
 /// The agents box with both names at their minimum.
 const AGENTS_MIN: u16 = PROCESS + PROJECT + AGENTS_FIXED;
 /// Orphan process names are cut to the width of their `process` header.
 const ORPHAN_NAME: usize = 7;
-/// The orphans box without `from`: pid, name, cores, mem, four gaps, two
+/// The orphans box without `from`: pid, name, cpu, mem, four gaps, two
 /// borders and a blank column inside each.
 const ORPHANS_FIXED: u16 = PID_WIDTH + ORPHAN_NAME as u16 + CPU_WIDTH + MEM_WIDTH + 4 + 2 + 2;
-/// Fits a whole orphan row such as `9120 node claude/hum 0.00 48.0M` and
-/// the `process` header. Narrower orphan sections drop cores.
+/// Fits a whole orphan row such as `9120 node claude/hum 0% 48.0M` and
+/// the `process` header. Narrower orphan sections drop cpu.
 const SIDE_MIN: u16 = ORPHANS_FIXED + "claude/hum".len() as u16;
 /// The ports box without process and agent: port, pid, three gaps, two
 /// borders and a blank column inside each.
@@ -493,7 +493,7 @@ fn agents_section(entries: &[Entry], width: u16, theme: &Theme) -> Section {
                 Cell::from("process"),
                 Cell::from("project"),
                 num("pid".into()),
-                num("cores".into()),
+                num("cpu%".into()),
                 num("mem".into()),
             ],
             cpu,
@@ -549,7 +549,7 @@ fn orphans_section(orphans: &[Orphan], width: u16, theme: &Theme) -> Section {
                 num("pid".into()),
                 Cell::from("process"),
                 Cell::from("from"),
-                num("cores".into()),
+                num("cpu%".into()),
                 num("mem".into()),
             ],
             cpu,
@@ -1026,8 +1026,10 @@ fn fmt_bytes(bytes: u64) -> String {
     }
 }
 
+/// Percent of one core, as in htop and top: a process busy on two cores
+/// shows `200%`.
 fn fmt_cpu(pct: f32) -> String {
-    format!("{:.2}", agents::cores(pct))
+    format!("{pct:.0}%")
 }
 
 #[cfg(test)]
@@ -1582,10 +1584,10 @@ mod tests {
     }
 
     #[test]
-    fn narrow_panes_drop_the_cores_column() {
-        let cores = |width| draw_lines((width, 16), mockup())[3].contains("cores");
-        assert!(cores(48));
-        assert!(!cores(47));
+    fn narrow_panes_drop_the_cpu_column() {
+        let cpu = |width| draw_lines((width, 16), mockup())[3].contains("cpu%");
+        assert!(cpu(48));
+        assert!(!cpu(47));
         let lines = draw_lines((40, 16), mockup());
         // project and orphan `from` keep their room
         assert!(lines[4].contains(" hum "), "{lines:#?}");
@@ -1615,6 +1617,14 @@ mod tests {
     }
 
     #[test]
+    fn cpu_shows_whole_percent_of_one_core() {
+        assert_eq!(fmt_cpu(0.0), "0%");
+        assert_eq!(fmt_cpu(2.4), "2%");
+        assert_eq!(fmt_cpu(101.7), "102%");
+        assert_eq!(fmt_cpu(340.0), "340%");
+    }
+
+    #[test]
     fn braille_bar_shows_any_use_and_clamps() {
         assert_eq!(bar(0.001, 4), "⡀⠀⠀⠀");
         assert_eq!(bar(1.5, 2), "⣿⣿");
@@ -1639,7 +1649,7 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(" ")
         };
-        assert_eq!(words(&lines[3]), "process project pid cores mem");
+        assert_eq!(words(&lines[3]), "process project pid cpu% mem");
         assert!(lines[4].starts_with("│   ○ claude"), "{}", lines[4]);
     }
 
