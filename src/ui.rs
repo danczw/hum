@@ -20,13 +20,13 @@ use crate::theme::Theme;
 /// pid_max is at most 4194304 on 64-bit Linux: 7 digits.
 const PID_WIDTH: u16 = 7;
 const PID: Constraint = Constraint::Length(PID_WIDTH);
-/// `fmt_cores` up to 99.99 cores.
-const CORES_WIDTH: u16 = 5;
-const CORES: Constraint = Constraint::Length(CORES_WIDTH);
-/// Agents and orphans show cores as the 4th of 5 columns. Panes too narrow
+/// `fmt_cpu` up to 99.99 cores.
+const CPU_WIDTH: u16 = 5;
+const CPU: Constraint = Constraint::Length(CPU_WIDTH);
+/// Agents and orphans show cpu as the 4th of 5 columns. Panes too narrow
 /// for their name columns drop it and its gap.
-const CORES_COL: usize = 3;
-const CORES_SPAN: u16 = CORES_WIDTH + 1;
+const CPU_COL: usize = 3;
+const CPU_SPAN: u16 = CPU_WIDTH + 1;
 /// `fmt_bytes` up to `1023.9M`.
 const MEM_WIDTH: u16 = 7;
 const MEM: Constraint = Constraint::Length(MEM_WIDTH);
@@ -38,14 +38,14 @@ const PROCESS: u16 = 12;
 const PROJECT: u16 = 9;
 /// The agents box without its name columns: pid, cores, mem, four gaps, two
 /// borders and a blank column inside each.
-const AGENTS_FIXED: u16 = PID_WIDTH + CORES_WIDTH + MEM_WIDTH + 4 + 2 + 2;
+const AGENTS_FIXED: u16 = PID_WIDTH + CPU_WIDTH + MEM_WIDTH + 4 + 2 + 2;
 /// The agents box with both names at their minimum.
 const AGENTS_MIN: u16 = PROCESS + PROJECT + AGENTS_FIXED;
 /// Orphan process names are cut to the width of their `process` header.
 const ORPHAN_NAME: usize = 7;
 /// The orphans box without `from`: pid, name, cores, mem, four gaps, two
 /// borders and a blank column inside each.
-const ORPHANS_FIXED: u16 = PID_WIDTH + ORPHAN_NAME as u16 + CORES_WIDTH + MEM_WIDTH + 4 + 2 + 2;
+const ORPHANS_FIXED: u16 = PID_WIDTH + ORPHAN_NAME as u16 + CPU_WIDTH + MEM_WIDTH + 4 + 2 + 2;
 /// Fits a whole orphan row such as `9120 node claude/hum 0.00 48.0M` and
 /// the `process` header. Narrower orphan sections drop cores.
 const SIDE_MIN: u16 = ORPHANS_FIXED + "claude/hum".len() as u16;
@@ -421,10 +421,10 @@ fn draw_cores(frame: &mut Frame, cores: &[f64], grid: CoreGrid, area: Rect, them
 
 /// `width` is the whole box. Width beyond both names' minimum goes 3:1 to
 /// process and project, and names longer than their column end in `…`.
-/// Below both minimums the cores column goes first, then project gives way.
+/// Below both minimums the cpu column goes first, then project gives way.
 fn agents_section(entries: &[Entry], width: u16, theme: &Theme) -> Section {
-    let cores = width >= AGENTS_MIN;
-    let names = name_room(width, AGENTS_FIXED, cores);
+    let cpu = width >= AGENTS_MIN;
+    let names = name_room(width, AGENTS_FIXED, cpu);
     let project =
         names.saturating_sub(PROCESS).min(PROJECT) + names.saturating_sub(PROCESS + PROJECT) / 4;
     let process = names - project;
@@ -455,17 +455,17 @@ fn agents_section(entries: &[Entry], width: u16, theme: &Theme) -> Section {
                         Cell::from(name),
                         Cell::from(agent.label().fit_project(project_max)),
                         num(agent.root().pid.to_string()),
-                        num(fmt_cores(agent.cpu)),
+                        num(fmt_cpu(agent.cpu)),
                         num(fmt_bytes(agent.mem())),
                     ],
-                    cores,
+                    cpu,
                 ))
                 .style(theme.accent)
             }
             outline::Line::Subagent(s) => {
                 let mut cells = [""; 5].map(Cell::from);
                 cells[0] = Cell::from(cut(&branch(1, &format!("◇ {}", s.kind)), process_max));
-                Row::new(columns(cells, cores))
+                Row::new(columns(cells, cpu))
             }
             outline::Line::Proc(p) => Row::new(columns(
                 [
@@ -473,10 +473,10 @@ fn agents_section(entries: &[Entry], width: u16, theme: &Theme) -> Section {
                     // Cell::default() spans zero columns and would shift the rest.
                     Cell::from(""),
                     num(p.pid.to_string()),
-                    num(fmt_cores(p.cpu)),
+                    num(fmt_cpu(p.cpu)),
                     num(fmt_bytes(p.mem)),
                 ],
-                cores,
+                cpu,
             )),
         })
         .collect();
@@ -496,7 +496,7 @@ fn agents_section(entries: &[Entry], width: u16, theme: &Theme) -> Section {
                 num("cores".into()),
                 num("mem".into()),
             ],
-            cores,
+            cpu,
         )),
         rows,
         widths: columns(
@@ -504,10 +504,10 @@ fn agents_section(entries: &[Entry], width: u16, theme: &Theme) -> Section {
                 Constraint::Length(process),
                 Constraint::Length(project),
                 PID,
-                CORES,
+                CPU,
                 MEM,
             ],
-            cores,
+            cpu,
         ),
         inline: None,
     }
@@ -516,8 +516,8 @@ fn agents_section(entries: &[Entry], width: u16, theme: &Theme) -> Section {
 /// Orphan rows warn, except `from`: agent tags keep the default color.
 /// `width` is the whole box.
 fn orphans_section(orphans: &[Orphan], width: u16, theme: &Theme) -> Section {
-    let cores = width >= SIDE_MIN;
-    let from_max = usize::from(name_room(width, ORPHANS_FIXED, cores));
+    let cpu = width >= SIDE_MIN;
+    let from_max = usize::from(name_room(width, ORPHANS_FIXED, cpu));
     let rows = orphans
         .iter()
         .map(|o| {
@@ -527,10 +527,10 @@ fn orphans_section(orphans: &[Orphan], width: u16, theme: &Theme) -> Section {
                     num(o.pid.to_string()),
                     Cell::from(cut(&o.name, ORPHAN_NAME)),
                     Cell::from(from).style(Style::reset()),
-                    num(fmt_cores(o.cpu)),
+                    num(fmt_cpu(o.cpu)),
                     num(fmt_bytes(o.mem)),
                 ],
-                cores,
+                cpu,
             ))
             .style(theme.warn)
         })
@@ -552,7 +552,7 @@ fn orphans_section(orphans: &[Orphan], width: u16, theme: &Theme) -> Section {
                 num("cores".into()),
                 num("mem".into()),
             ],
-            cores,
+            cpu,
         )),
         rows,
         // name as wide as its `process` header; `from` takes the rest
@@ -561,26 +561,26 @@ fn orphans_section(orphans: &[Orphan], width: u16, theme: &Theme) -> Section {
                 PID,
                 Constraint::Length(ORPHAN_NAME as u16),
                 Constraint::Fill(1),
-                CORES,
+                CPU,
                 MEM,
             ],
-            cores,
+            cpu,
         ),
         inline: None,
     }
 }
 
 /// Width a box of `width` leaves its name columns once `fixed` is taken,
-/// counting the cores column back in when the box drops it.
-fn name_room(width: u16, fixed: u16, cores: bool) -> u16 {
-    (width + if cores { 0 } else { CORES_SPAN }).saturating_sub(fixed)
+/// counting the cpu column back in when the box drops it.
+fn name_room(width: u16, fixed: u16, cpu: bool) -> u16 {
+    (width + if cpu { 0 } else { CPU_SPAN }).saturating_sub(fixed)
 }
 
-/// The columns of an agents or orphans row, without cores unless `cores`.
-fn columns<T>(columns: [T; 5], cores: bool) -> Vec<T> {
+/// The columns of an agents or orphans row, without cpu unless `cpu`.
+fn columns<T>(columns: [T; 5], cpu: bool) -> Vec<T> {
     let mut columns = Vec::from(columns);
-    if !cores {
-        columns.remove(CORES_COL);
+    if !cpu {
+        columns.remove(CPU_COL);
     }
     columns
 }
@@ -1026,7 +1026,7 @@ fn fmt_bytes(bytes: u64) -> String {
     }
 }
 
-fn fmt_cores(pct: f32) -> String {
+fn fmt_cpu(pct: f32) -> String {
     format!("{:.2}", agents::cores(pct))
 }
 
