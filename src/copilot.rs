@@ -55,7 +55,7 @@ impl Copilot {
             let held = |log: &Log| host.times(&log.dir.join(&lock)).is_some();
             if !self.logs.get(&key).is_some_and(held) {
                 self.logs.remove(&key);
-                if let Some(dir) = session_dir(&self.home, &lock, key.start, host) {
+                if let Some(dir) = session_dir(&self.home, &lock, host) {
                     let log = Log {
                         dir,
                         offset: 0,
@@ -72,24 +72,26 @@ impl Copilot {
     }
 }
 
-/// The session dir holding `lock`, unless the lock is older than the
-/// process, started at `start` in seconds since the epoch: then an earlier
-/// process on the same pid left it behind.
-fn session_dir(home: &Path, lock: &str, start: u64, host: &impl Host) -> Option<PathBuf> {
-    // sysinfo counts the start from the boot time in whole seconds, so it
-    // may read up to a second late
-    let started = SystemTime::UNIX_EPOCH + Duration::from_secs(start.saturating_sub(1));
+/// The session dir holding the newest `lock`. A copilot that crashed left
+/// its lock behind, so a later process on its pid may find two; the events
+/// of a left-over session are too old to count anyway, see [`Log::read`].
+/// Lock times are not checked against the process start, as that moves with
+/// clock steps after the lock was made.
+fn session_dir(home: &Path, lock: &str, host: &impl Host) -> Option<PathBuf> {
     host.list(&home.join("session-state"))?
         .into_iter()
-        .find(|dir| {
-            host.times(&dir.join(lock))
-                .is_some_and(|t| t.created.unwrap_or(t.modified) >= started)
+        .filter_map(|dir| {
+            let t = host.times(&dir.join(lock))?;
+            Some((t.created.unwrap_or(t.modified), dir))
         })
+        .max()
+        .map(|(_, dir)| dir)
 }
 
 impl Log {
     /// Applies the lines appended since the last read, then drops subagents
-    /// quiet for [`SUBAGENT_QUIET`], as a crashed one never logs its end. A
+    /// whose last event is older than [`SUBAGENT_QUIET`], as a crashed one
+    /// never logs its end. A
     /// log shorter than what was read was replaced, so it is read anew.
     fn read(&mut self, now: SystemTime, host: &impl Host) {
         let path = self.dir.join("events.jsonl");
@@ -117,11 +119,13 @@ impl Log {
         let Some(id) = top_level_str(line, "agentId") else {
             return;
         };
+        let now = timestamp(line).unwrap_or(now);
         match top_level_str(line, "type").as_deref() {
             Some("subagent.started") => {
                 let data = top_level_raw(line, "data").unwrap_or_default();
                 let named = |key| top_level_str(&data, key).filter(|n| !n.is_empty());
                 if let Some(kind) = named("agentDisplayName").or_else(|| named("agentName")) {
+                    self.running.retain(|(s, _)| s.id != id);
                     self.running.push((Subagent { id, kind }, now));
                 }
             }
@@ -138,6 +142,21 @@ impl Log {
             }
         }
     }
+}
+
+/// An event's `timestamp` to the second, e.g. `2026-11-25T12:05:34.734Z`,
+/// always UTC.
+fn timestamp(line: &str) -> Option<SystemTime> {
+    let t = top_level_str(line, "timestamp")?;
+    let n = |at: usize, len: usize| t.get(at..at + len)?.parse::<i64>().ok();
+    let (y, m, d) = (n(0, 4)?, n(5, 2)?, n(8, 2)?);
+    // days since the epoch, by Howard Hinnant's days_from_civil
+    let y = if m <= 2 { y - 1 } else { y };
+    let (era, yoe) = (y.div_euclid(400), y.rem_euclid(400));
+    let doy = (153 * ((m + 9) % 12) + 2) / 5 + d - 1;
+    let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
+    let secs = days * 86_400 + n(11, 2)? * 3600 + n(14, 2)? * 60 + n(17, 2)?;
+    Some(SystemTime::UNIX_EPOCH + Duration::from_secs(u64::try_from(secs).ok()?))
 }
 
 #[cfg(test)]
@@ -268,16 +287,55 @@ mod tests {
         assert!(tick(&mut copilot(), &host(&[output.into()]), 100).is_empty());
     }
 
+    /// `line` logged at second `secs` of the epoch's first day.
+    fn stamped(line: &str, secs: u64) -> String {
+        let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
+        let stamp = format!(r#","timestamp":"1970-01-01T{h:02}:{m:02}:{s:02}.734Z"}}"#);
+        line.strip_suffix('}').unwrap().to_string() + &stamp
+    }
+
     #[test]
-    fn missing_or_stale_lock_has_no_session() {
-        let line = started("a1", "x", "sync");
-        let mut host = host(&[line]);
-        // left by an earlier process on pid 10
-        host.file(format!("{DIR}/inuse.10.lock"), "10", at(50));
-        assert!(tick(&mut copilot(), &host, 100).is_empty());
+    fn replayed_subagent_counts_from_its_own_events() {
+        let host = host(&[stamped(&started("a1", "x", "sync"), 100)]);
+        assert_eq!(tick(&mut copilot(), &host, 760), ["x"]);
+        // hum started, or the session was resumed, long after it crashed
+        assert!(tick(&mut copilot(), &host, 761).is_empty());
+    }
+
+    #[test]
+    fn newest_lock_names_the_session() {
+        // left by an earlier, crashed process on pid 10
+        let stale = "/cp/session-state/01d";
+        let mut host = host(&[started("a1", "live", "sync")]);
+        host.file(format!("{stale}/inuse.10.lock"), "10", at(50));
+        host.file(
+            format!("{stale}/events.jsonl"),
+            &started("a0", "old", "sync"),
+            at(50),
+        );
+        assert_eq!(tick(&mut copilot(), &host, 100), ["live"]);
         host.files
             .remove(Path::new(&format!("{DIR}/inuse.10.lock")));
+        host.files
+            .remove(Path::new(&format!("{stale}/inuse.10.lock")));
         assert!(tick(&mut copilot(), &host, 100).is_empty());
+    }
+
+    #[test]
+    fn repeated_start_is_one_subagent() {
+        let line = started("a1", "x", "sync");
+        assert_eq!(
+            tick(&mut copilot(), &host(&[line.clone(), line]), 100),
+            ["x"]
+        );
+    }
+
+    #[test]
+    fn timestamp_is_utc_seconds() {
+        let at_ = |t: &str| timestamp(&format!(r#"{{"timestamp":"{t}"}}"#));
+        assert_eq!(at_("2026-11-25T12:05:34.734Z"), Some(at(1_795_608_334)));
+        assert_eq!(at_("2024-02-29T00:00:00Z"), Some(at(1_709_164_800)));
+        assert_eq!(at_("soon"), None);
     }
 
     #[test]
