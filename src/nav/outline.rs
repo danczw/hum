@@ -286,6 +286,12 @@ mod tests {
         outline.fold(&agents(&[10]), &pid(10), Fold::Collapse);
         outline.sync(&now, None);
         assert_eq!(rows(&outline, &now), ["10", "20"]);
+
+        let mut outline = Outline::default();
+        outline.expand_all(&agents(&[10]));
+        outline.fold(&agents(&[10]), &pid(10), Fold::Toggle);
+        outline.sync(&now, None);
+        assert_eq!(rows(&outline, &now), ["10", "20"]);
     }
 
     #[test]
