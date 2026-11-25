@@ -6,10 +6,13 @@ use crate::claude::Subagent;
 
 /// The agents section as rows: each agent, and below an open one its
 /// subagents and processes. Only open roots are kept, so a new session
-/// starts collapsed.
+/// starts collapsed, unless every tree was expanded since the last collapse.
 #[derive(Default)]
 pub struct Outline {
     open: HashSet<ProcKey>,
+    /// Set by `expand_all`, cleared by any collapse: opens every tree that
+    /// gains children.
+    all: bool,
 }
 
 /// One row of the agents section and the key the cursor finds it by.
@@ -70,7 +73,9 @@ impl Outline {
             // kept closed, so children spawned later start collapsed
             _ if !agent.has_children() => {}
             Fold::Toggle => {
-                if !self.open.remove(&root) {
+                if self.open.remove(&root) {
+                    self.all = false;
+                } else {
                     self.open.insert(root);
                 }
             }
@@ -79,13 +84,15 @@ impl Outline {
             }
             Fold::Collapse => {
                 self.open.remove(&root);
+                self.all = false;
             }
         }
         self.hidden(at, root)
     }
 
     /// Forgets the sessions that exited or have no children left, so
-    /// children spawned later start collapsed. Returns the root of `at` when
+    /// children spawned later start collapsed, or after `expand_all` opens
+    /// every session with children. Returns the root of `at` when
     /// its tree is closed: after `collapse_all`, or when the tree lost its
     /// children or `at` now sits under another root.
     pub fn sync(&mut self, agents: &[Agent], at: Option<&Key>) -> Option<Key> {
@@ -94,7 +101,11 @@ impl Outline {
             .filter(|a| a.has_children())
             .map(Agent::key)
             .collect();
-        self.open.retain(|k| roots.contains(k));
+        if self.all {
+            self.open = roots;
+        } else {
+            self.open.retain(|k| roots.contains(k));
+        }
         let at = at?;
         self.hidden(at, tree_of(agents, at)?.key())
     }
@@ -106,14 +117,16 @@ impl Outline {
         (*at != root && !open).then_some(root)
     }
 
-    /// Childless roots stay closed, so children spawned later start
-    /// collapsed.
+    /// Childless roots open on the first `sync` that finds them with
+    /// children.
     pub fn expand_all(&mut self, agents: &[Agent]) {
+        self.all = true;
         self.open
             .extend(agents.iter().filter(|a| a.has_children()).map(Agent::key));
     }
 
     pub fn collapse_all(&mut self) {
+        self.all = false;
         self.open.clear();
     }
 }
@@ -189,7 +202,7 @@ mod tests {
     #[test]
     fn sessions_start_collapsed() {
         let mut outline = Outline::default();
-        outline.expand_all(&agents(&[10]));
+        outline.fold(&agents(&[10]), &pid(10), Fold::Expand);
         let now = agents(&[10, 20]);
         outline.sync(&now, None);
         assert_eq!(rows(&outline, &now), ["10", "11", "20"]);
@@ -239,14 +252,40 @@ mod tests {
     }
 
     #[test]
-    fn expand_all_leaves_childless_roots_closed() {
+    fn expand_all_opens_roots_that_gain_children() {
         let mut outline = Outline::default();
         let mut now = agents(&[10, 20]);
         now[1].procs.truncate(1);
         outline.expand_all(&now);
-        // 20 gets a child: it starts collapsed
+        outline.sync(&now, None);
         let later = agents(&[10, 20]);
-        assert_eq!(rows(&outline, &later), ["10", "11", "20"]);
+        outline.sync(&later, None);
+        assert_eq!(rows(&outline, &later), ["10", "11", "20", "21"]);
+    }
+
+    #[test]
+    fn sessions_started_after_expand_all_open() {
+        let mut outline = Outline::default();
+        outline.expand_all(&agents(&[10]));
+        let now = agents(&[10, 20]);
+        outline.sync(&now, None);
+        assert_eq!(rows(&outline, &now), ["10", "11", "20", "21"]);
+    }
+
+    #[test]
+    fn sessions_start_collapsed_after_any_collapse() {
+        let now = agents(&[10, 20]);
+        let mut outline = Outline::default();
+        outline.expand_all(&agents(&[10]));
+        outline.collapse_all();
+        outline.sync(&now, None);
+        assert_eq!(rows(&outline, &now), ["10", "20"]);
+
+        let mut outline = Outline::default();
+        outline.expand_all(&agents(&[10]));
+        outline.fold(&agents(&[10]), &pid(10), Fold::Collapse);
+        outline.sync(&now, None);
+        assert_eq!(rows(&outline, &now), ["10", "20"]);
     }
 
     #[test]
