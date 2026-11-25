@@ -30,7 +30,13 @@ pub struct Copilot {
 struct Log {
     dir: PathBuf,
     offset: u64,
-    /// In start order, each with the time of its last event.
+    /// When the process took the lock. Subagents started before belong to
+    /// an earlier process on a resumed session, which may have been cut off
+    /// before logging their end.
+    since: SystemTime,
+    /// Not yet ended, in start order, each with the time of its last event.
+    /// Ones quiet for [`SUBAGENT_QUIET`] are kept but not shown, as a crashed
+    /// one never logs its end.
     running: Vec<(Subagent, SystemTime)>,
 }
 
@@ -54,10 +60,11 @@ impl Copilot {
             let held = |log: &Log| host.times(&log.dir.join(&lock)).is_some();
             if !self.logs.get(&key).is_some_and(held) {
                 self.logs.remove(&key);
-                if let Some(dir) = session_dir(&self.home, &lock, host) {
+                if let Some((since, dir)) = session_dir(&self.home, &lock, host) {
                     let log = Log {
                         dir,
                         offset: 0,
+                        since,
                         running: Vec::new(),
                     };
                     self.logs.insert(key, log);
@@ -65,18 +72,26 @@ impl Copilot {
             }
             if let Some(log) = self.logs.get_mut(&key) {
                 log.read(now, host);
-                agent.subagents = log.running.iter().map(|(s, _)| s.clone()).collect();
+                let quiet_since = now
+                    .checked_sub(SUBAGENT_QUIET)
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                agent.subagents = log
+                    .running
+                    .iter()
+                    .filter(|&&(_, last)| last >= quiet_since)
+                    .map(|(s, _)| s.clone())
+                    .collect();
             }
         }
     }
 }
 
-/// The session dir holding the newest `lock`. A copilot that crashed left
-/// its lock behind, so a later process on its pid may find two; the events
-/// of a left-over session are too old to count anyway, see [`Log::read`].
+/// The session dir holding the newest `lock`, with the lock's birth time. A
+/// copilot that crashed left its lock behind, so a later process on its pid
+/// may find two; the events of a left-over session are too old to show.
 /// Lock times are not checked against the process start, as that moves with
 /// clock steps after the lock was made.
-fn session_dir(home: &Path, lock: &str, host: &impl Host) -> Option<PathBuf> {
+fn session_dir(home: &Path, lock: &str, host: &impl Host) -> Option<(SystemTime, PathBuf)> {
     host.list(&home.join("session-state"))?
         .into_iter()
         .filter_map(|dir| {
@@ -84,14 +99,11 @@ fn session_dir(home: &Path, lock: &str, host: &impl Host) -> Option<PathBuf> {
             Some((t.created.unwrap_or(t.modified), dir))
         })
         .max()
-        .map(|(_, dir)| dir)
 }
 
 impl Log {
-    /// Applies the lines appended since the last read, then drops subagents
-    /// whose last event is older than [`SUBAGENT_QUIET`], as a crashed one
-    /// never logs its end. A log shorter than what was read was replaced, so
-    /// it is read anew.
+    /// Applies the lines appended since the last read. A log shorter than
+    /// what was read was replaced, so it is read anew.
     fn read(&mut self, now: SystemTime, host: &impl Host) {
         let path = self.dir.join("events.jsonl");
         let bytes = host.read_from(&path, self.offset).unwrap_or_else(|| {
@@ -105,10 +117,6 @@ impl Log {
         for line in String::from_utf8_lossy(&bytes[..end]).lines() {
             self.apply(line, now);
         }
-        let quiet_since = now
-            .checked_sub(SUBAGENT_QUIET)
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-        self.running.retain(|&(_, last)| last >= quiet_since);
     }
 
     /// One event, parsed as a whole line: tool output may quote event names.
@@ -120,7 +128,7 @@ impl Log {
         };
         let now = timestamp(line).unwrap_or(now);
         match top_level_str(line, "type").as_deref() {
-            Some("subagent.started") => {
+            Some("subagent.started") if now >= self.since => {
                 let data = top_level_raw(line, "data").unwrap_or_default();
                 let named = |key| top_level_str(&data, key).filter(|n| !n.is_empty());
                 if let Some(kind) = named("agentDisplayName").or_else(|| named("agentName")) {
@@ -262,6 +270,10 @@ mod tests {
         assert_eq!(tick(&mut copilot, &host, 700), ["x"]);
         assert_eq!(tick(&mut copilot, &host, 1360), ["x"]);
         assert!(tick(&mut copilot, &host, 1361).is_empty());
+        // logging again, e.g. after a long build, brings it back
+        lines.push(event("a1", "tool.execution_complete"));
+        log(&mut host, &lines);
+        assert_eq!(tick(&mut copilot, &host, 1400), ["x"]);
     }
 
     #[test]
@@ -299,6 +311,16 @@ mod tests {
         assert_eq!(tick(&mut copilot(), &host, 760), ["x"]);
         // hum started, or the session was resumed, long after it crashed
         assert!(tick(&mut copilot(), &host, 761).is_empty());
+    }
+
+    #[test]
+    fn resumed_session_skips_subagents_of_the_earlier_process() {
+        let mut host = host(&[
+            stamped(&started("a1", "cut-off", "background"), 99),
+            stamped(&started("a2", "new", "sync"), 100),
+        ]);
+        host.file(format!("{DIR}/inuse.10.lock"), "10", at(100));
+        assert_eq!(tick(&mut copilot(), &host, 101), ["new"]);
     }
 
     #[test]
