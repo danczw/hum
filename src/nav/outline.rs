@@ -70,7 +70,7 @@ impl Outline {
         let root = agent.key();
         match fold {
             Fold::Collapse if *at != Key::Proc(root) => return Some(Key::Proc(root)),
-            // kept closed, so children spawned later start collapsed
+            // kept closed; children spawned later start collapsed unless `all`
             _ if !agent.has_children() => {}
             Fold::Toggle => {
                 if self.open.remove(&root) {
