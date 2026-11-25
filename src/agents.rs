@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 use sysinfo::{Pid, System};
 
 use crate::claude::{self, Name, SessionFile, SessionId, Subagent};
+use crate::copilot::Copilot;
 use crate::host::{Host, ProcHost};
 use crate::label::{Label, cut};
 
@@ -138,7 +139,8 @@ pub struct Agent {
     pub session: Option<String>,
     /// Names the directory of its subagents, see [`SessionId`].
     pub session_id: Option<SessionId>,
-    /// Set from [`claude::running_subagents`]; empty for other agents.
+    /// Set from [`claude::running_subagents`] or [`Copilot::update`];
+    /// empty for other agents.
     pub subagents: Vec<Subagent>,
 }
 
@@ -772,6 +774,7 @@ pub struct Sessions<H = ProcHost> {
     home: Option<PathBuf>,
     /// See [`claude::config`].
     claude: Option<PathBuf>,
+    copilot: Option<Copilot>,
     /// Names added with `--agent`, see [`scan`].
     extra: Vec<&'static str>,
     cpu: TreeCpu,
@@ -784,6 +787,7 @@ impl<H: Host> Sessions<H> {
     pub fn new(
         home: Option<PathBuf>,
         claude: Option<PathBuf>,
+        copilot: Option<PathBuf>,
         extra: Vec<&'static str>,
         tick: Duration,
         host: H,
@@ -792,6 +796,7 @@ impl<H: Host> Sessions<H> {
             host,
             home,
             claude,
+            copilot: copilot.map(Copilot::new),
             extra,
             cpu: TreeCpu::default(),
             busy: BusyTracker::new(busy_window(tick)),
@@ -818,6 +823,9 @@ impl<H: Host> Sessions<H> {
                     agent.subagents = claude::running_subagents(claude, cwd, id, now, &self.host);
                 }
             }
+        }
+        if let Some(copilot) = &mut self.copilot {
+            copilot.update(&mut agents, now, &self.host);
         }
         self.busy.update(&mut agents);
         let orphans = merge(
@@ -1752,6 +1760,7 @@ mod tests {
         let mut sessions = Sessions::new(
             home().map(Path::to_path_buf),
             claude().map(Path::to_path_buf),
+            None,
             Vec::new(),
             Duration::from_secs(1),
             host,

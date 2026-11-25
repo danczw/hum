@@ -6,11 +6,11 @@ use sysinfo::Pid;
 
 use crate::host::Host;
 
-/// How long a subagent's transcript may go unwritten before it counts as
-/// stopped, see [`running_subagents`]. A minute past Claude Code's longest
-/// Bash timeout, 10 minutes, so a subagent waiting on one command stays
-/// listed.
-const SUBAGENT_QUIET: Duration = Duration::from_secs(660);
+/// How long a subagent may go without writing before it counts as stopped,
+/// see [`running_subagents`] and [`crate::copilot`]. A minute past Claude
+/// Code's longest Bash timeout, 10 minutes, so a subagent waiting on one
+/// command stays listed.
+pub const SUBAGENT_QUIET: Duration = Duration::from_secs(660);
 
 /// Claude Code's file for a running session. Its format is internal and
 /// may change, so every field is optional.
@@ -65,11 +65,13 @@ impl SessionFile {
     }
 }
 
-/// A subagent Claude Code runs inside its own process, so it has no pid.
+/// A subagent an agent runs inside its own process, so it has no pid.
+#[derive(Clone)]
 pub struct Subagent {
-    /// The `<id>` in `agent-<id>.meta.json`.
+    /// The `<id>` in `agent-<id>.meta.json`, or Copilot's `agentId`.
     pub id: String,
-    /// The meta file's `name`, else its `agentType`, e.g. `Explore`.
+    /// The meta file's `name`, else its `agentType`, e.g. `Explore`; for
+    /// Copilot its `agentDisplayName`.
     pub kind: String,
 }
 
@@ -198,10 +200,19 @@ fn subagent(meta: &str) -> Option<String> {
 /// The string value of `key` in a JSON object's top level, skipping nested
 /// objects and arrays. None when the key is missing, not a string, or the
 /// JSON does not parse up to it.
-fn top_level_str(json: &str, key: &str) -> Option<String> {
+pub fn top_level_str(json: &str, key: &str) -> Option<String> {
     match top_level(json, key)? {
         Field::Str(v) => Some(v),
         Field::Raw(_) => None,
+    }
+}
+
+/// The raw text of a non-string top-level value, e.g. a nested object to
+/// read with [`top_level_str`] in turn.
+pub fn top_level_raw(json: &str, key: &str) -> Option<String> {
+    match top_level(json, key)? {
+        Field::Raw(v) => Some(v),
+        Field::Str(_) => None,
     }
 }
 
@@ -263,15 +274,24 @@ fn json_string(chars: &mut Chars) -> Option<String> {
 }
 
 /// Skips a non-string JSON value, nested objects and arrays included, up to
-/// the `,` or `}` after it. Returns the text skipped outside nested strings,
-/// e.g. `12` for a number.
+/// the `,` or `}` after it. Returns the text skipped, e.g. `12` for a number.
 fn skip_json_value(chars: &mut Chars) -> Option<String> {
     let mut depth = 0usize;
     let mut raw = String::new();
     loop {
         match *chars.peek()? {
+            // copied escaped, so the raw text parses again
             '"' => {
-                json_string(chars)?;
+                raw.push(chars.next()?);
+                loop {
+                    let c = chars.next()?;
+                    raw.push(c);
+                    match c {
+                        '"' => break,
+                        '\\' => raw.push(chars.next()?),
+                        _ => {}
+                    }
+                }
             }
             ',' | '}' | ']' if depth == 0 => return Some(raw),
             c => {
@@ -480,6 +500,10 @@ mod tests {
             Some("new \"one\"\\ é")
         );
         assert_eq!(top_level_str(json, "cwd").as_deref(), Some(HUM));
+        let meta = top_level_raw(json, "meta").unwrap();
+        assert_eq!(top_level_str(&meta, "cwd").as_deref(), Some("/x"));
+        let raw = top_level_raw(r#"{"data":{"a":"q\"}"}}"#, "data");
+        assert_eq!(raw.as_deref(), Some(r#"{"a":"q\"}"}"#));
         let only_former =
             r#"{"cwd":"/home/u/code/hum","formerNames":[{"name":"old","nameSource":"user"}]}"#;
         assert_eq!(top_level_str(only_former, "name"), None);

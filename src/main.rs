@@ -1,6 +1,7 @@
 mod agents;
 mod claude;
 mod cli;
+mod copilot;
 mod host;
 mod label;
 mod meminfo;
@@ -40,10 +41,11 @@ impl App {
     fn new(tick: Duration, agents: Vec<&'static str>) -> io::Result<Self> {
         let home = agents::canonical_home(std::env::var_os("HOME"));
         let claude = claude::config(std::env::var_os("CLAUDE_CONFIG_DIR"), home.as_deref());
+        let copilot = copilot::home(std::env::var_os("COPILOT_HOME"), home.as_deref());
         Ok(Self {
             sys: System::new().map_err(io::Error::other)?,
             host: ProcHost,
-            sessions: Sessions::new(home, claude, agents, tick, ProcHost),
+            sessions: Sessions::new(home, claude, copilot, agents, tick, ProcHost),
             ports: Ports::new(ProcHost, tick),
             tick,
         })
