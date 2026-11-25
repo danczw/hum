@@ -30,7 +30,7 @@ pub struct Copilot {
 struct Log {
     dir: PathBuf,
     offset: u64,
-    /// In start order, each with when its last event was read.
+    /// In start order, each with the time of its last event.
     running: Vec<(Subagent, SystemTime)>,
 }
 
@@ -49,8 +49,7 @@ impl Copilot {
             .retain(|key, _| agents.iter().any(|a| a.key() == *key));
         for agent in agents.iter_mut().filter(|a| a.kind == "copilot") {
             let key = agent.key();
-            // copilot holds the lock while the session is open, and moves it
-            // when the user switches sessions
+            // copilot removes the lock when it exits cleanly
             let lock = format!("inuse.{}.lock", key.pid);
             let held = |log: &Log| host.times(&log.dir.join(&lock)).is_some();
             if !self.logs.get(&key).is_some_and(held) {
@@ -91,8 +90,8 @@ fn session_dir(home: &Path, lock: &str, host: &impl Host) -> Option<PathBuf> {
 impl Log {
     /// Applies the lines appended since the last read, then drops subagents
     /// whose last event is older than [`SUBAGENT_QUIET`], as a crashed one
-    /// never logs its end. A
-    /// log shorter than what was read was replaced, so it is read anew.
+    /// never logs its end. A log shorter than what was read was replaced, so
+    /// it is read anew.
     fn read(&mut self, now: SystemTime, host: &impl Host) {
         let path = self.dir.join("events.jsonl");
         let bytes = host.read_from(&path, self.offset).unwrap_or_else(|| {
