@@ -2,6 +2,7 @@
 //! [`Host`], so tests run on [`MemHost`] without real pids or temp dirs.
 
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -22,6 +23,9 @@ pub trait Host {
     fn meminfo(&self) -> Option<String>;
     /// A file's text; None when missing or unreadable.
     fn read(&self, path: &Path) -> Option<String>;
+    /// A file's bytes from `offset` on; None when missing or shorter than
+    /// `offset`.
+    fn read_from(&self, path: &Path, offset: u64) -> Option<Vec<u8>>;
     fn is_dir(&self, path: &Path) -> bool;
     /// The paths in `dir`, unsorted; None when it is unreadable.
     fn list(&self, dir: &Path) -> Option<Vec<PathBuf>>;
@@ -113,6 +117,17 @@ impl Host for ProcHost {
 
     fn read(&self, path: &Path) -> Option<String> {
         fs::read_to_string(path).ok()
+    }
+
+    fn read_from(&self, path: &Path, offset: u64) -> Option<Vec<u8>> {
+        let mut file = fs::File::open(path).ok()?;
+        if file.metadata().ok()?.len() < offset {
+            return None;
+        }
+        file.seek(SeekFrom::Start(offset)).ok()?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).ok()?;
+        Some(bytes)
     }
 
     fn is_dir(&self, path: &Path) -> bool {
@@ -225,6 +240,11 @@ mod mem {
             self.files.get(path).map(|(text, _)| text.clone())
         }
 
+        fn read_from(&self, path: &Path, offset: u64) -> Option<Vec<u8>> {
+            let (text, _) = self.files.get(path)?;
+            text.as_bytes().get(offset as usize..).map(<[u8]>::to_vec)
+        }
+
         fn is_dir(&self, path: &Path) -> bool {
             self.files.keys().any(|f| f != path && f.starts_with(path))
         }
@@ -296,12 +316,14 @@ mod tests {
         let mut listed = host.list(&dir).unwrap();
         listed.sort();
         let (read, times) = (host.read(&file), host.times(&file).map(|t| t.modified));
+        let tails = [1, 2, 3].map(|offset| host.read_from(&file, offset));
         let is_dir = (host.is_dir(&dir.join("sub")), host.is_dir(&file));
         let file_listed = host.list(&file);
         fs::remove_dir_all(&dir).unwrap();
         assert_eq!(listed, [file.clone(), dir.join("sub")]);
         assert_eq!(read.as_deref(), Some("{}"));
         assert_eq!(times, Some(at));
+        assert_eq!(tails, [Some(b"}".to_vec()), Some(Vec::new()), None]);
         assert_eq!(is_dir, (true, false));
         assert!(file_listed.is_none());
     }

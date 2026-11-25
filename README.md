@@ -7,7 +7,7 @@ A small terminal monitor for machines running coding agents. Built with [ratatui
 ![hum watching two Claude Code sessions. One session idles with an empty circle, an orphaned sleep process appears, a Python server under the agent opens port 8765, then a shell loop uses a full core, the agent's circle fills and its cpu% passes 100%. When the loop ends the circle empties.](assets/demo.gif)
 
 - CPU, memory and swap
-- Agents (claude, codex, aider, gemini, ...) with their process trees, oldest first, marked `●` while busy and `○` while idle. Claude Code reports its status in its session file; other agents count as busy while their tree uses cpu. Claude Code subagents show as `◇` rows under their session while they run, and keep it busy
+- Agents (claude, codex, aider, gemini, ...) with their process trees, oldest first, marked `●` while busy and `○` while idle. Claude Code reports its status in its session file; other agents count as busy while their tree uses cpu. Claude Code and Copilot CLI subagents show as `◇` rows under their session while they run, and keep it busy
 - Listening TCP ports of agents and orphans, tagged with their owner. A `*` after the port (`:3000*`) marks a bind to a non-loopback address such as `0.0.0.0`; `a` shows every port
 - Orphans: processes an agent started that outlived their parent. Claude Code marks its processes, so its orphans show even when they predate hum; for other agents hum catches them only while it runs
 
