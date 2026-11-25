@@ -91,8 +91,8 @@ impl Outline {
     }
 
     /// Forgets the sessions that exited or have no children left, so
-    /// children spawned later start collapsed, or after `expand_all` opens
-    /// every session with children. Returns the root of `at` when
+    /// children spawned later start collapsed; after `expand_all`, opens
+    /// every session with children instead. Returns the root of `at` when
     /// its tree is closed: after `collapse_all`, or when the tree lost its
     /// children or `at` now sits under another root.
     pub fn sync(&mut self, agents: &[Agent], at: Option<&Key>) -> Option<Key> {
