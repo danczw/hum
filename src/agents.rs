@@ -648,7 +648,7 @@ fn merge(mut tracked: Vec<Orphan>, env: Vec<Orphan>) -> Vec<Orphan> {
 }
 
 /// sysinfo reports process cpu as percent of one core; this is cores used.
-pub fn cores(pct: f32) -> f32 {
+fn cores(pct: f32) -> f32 {
     pct / 100.0
 }
 
